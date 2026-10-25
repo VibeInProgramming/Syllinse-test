@@ -12,7 +12,6 @@
 
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
-local isTouchDevice = UserInputService.TouchEnabled
 local showLauncherButton =
     UserInputService.TouchEnabled
     and not UserInputService.KeyboardEnabled
@@ -62,8 +61,6 @@ local Theme = {
     PanelIcon = Color3.fromRGB(170, 168, 168),
     PanelValue = Color3.fromRGB(128, 126, 126),
     SliderTrack = Color3.fromRGB(64, 62, 62),
-    -- Active fill is lighter than the base rail for stronger value readability.
-    SliderFill = Color3.fromRGB(168, 166, 166),
     SliderHead = Color3.fromRGB(112, 110, 110),
     SliderHandle = Color3.fromRGB(194, 192, 192),
     Muted = Color3.fromRGB(139, 137, 137),
@@ -756,9 +753,9 @@ for itemIndex, item in ipairs(navItems) do
     local button = Instance.new("TextButton")
     button.Name = item.Name .. "Button"
     -- Touch devices get a slightly larger hit area; icon art and desktop geometry stay unchanged.
-    local navTapSize = isTouchDevice and 78 or 46
+    local navTapSize = showLauncherButton and 58 or 46
     button.Size = UDim2.fromOffset(navTapSize, navTapSize)
-    button.Position = UDim2.fromOffset(isTouchDevice and 0 or 15, item.Y)
+    button.Position = UDim2.fromOffset(showLauncherButton and 9 or 15, item.Y)
     button.BackgroundColor3 = Theme.Root
     button.BackgroundTransparency = 1
     button.BorderSizePixel = 0
@@ -1615,7 +1612,7 @@ local loadOk, LumenOrError = pcall(function()
     )
     if not didPatch then warn("[Syllinse] Could not align Lumen section content below its larger header") end
 
-    -- Divider sits at y=32 and spans the full card width. Options begin at y=38. Slider rails stay dark, active fill is more contrasted, and touch devices use a single vertical column.
+    -- Divider sits at y=32 and spans the full card width, from the left edge to the right edge. Header title/icon remain centered above it. Options begin at y=38, option spacing is 15 px, and slider thumbs use a clean bright-gray fill without an outer glow or stroke.
 
 
     librarySource, didPatch = replaceLibraryText(
@@ -1770,7 +1767,7 @@ local loadOk, LumenOrError = pcall(function()
         'Image = "rbxassetid://96386750273341"; ImageTransparency = 0.2;',
         'Image = "rbxassetid://96386750273341"; ImageColor3 = Library.Theme.TextDim; ImageTransparency = 0.2;')
 
-    -- Keep the base slider rail dark, use a more contrasted active fill, and enlarge the slider thumb.
+    -- Give slider rails a restrained gray treatment and make the rounded slider thumb 14 px.
     librarySource = string.gsub(librarySource,
         'Name = "Button"; AutoButtonColor = false; BackgroundColor3 = RGB%(20, 20, 21%); BorderColor3 = RGB%(0, 0, 0%); BorderSizePixel = 0; FontFace = FN%("rbxasset://fonts/families/SourceSansPro.json", FW%.Regular, FS%.Normal%); Position = UFO%(0, 18%); Size = UD2%(1, 0, 0, 12%);',
         'Name = "Button"; AutoButtonColor = false; BackgroundColor3 = RGB(64, 62, 62); BorderColor3 = RGB(0, 0, 0); BorderSizePixel = 0; FontFace = FN("rbxasset://fonts/families/BuilderSans.json", FW.Regular, FS.Normal); Position = UFO(0, 18); Size = UD2(1, 0, 0, 12);')
@@ -1780,7 +1777,7 @@ local loadOk, LumenOrError = pcall(function()
     librarySource, didPatch = replaceLibraryText(
         librarySource,
         'local Circle = Add("Frame", { Parent = Button; Name = "Circle"; AnchorPoint = V2(1, 0.5); BackgroundColor3 = RGB(112, 110, 110); BorderColor3 = RGB(0, 0, 0); BorderSizePixel = 0; Position = UD2(1, -3, 0.5, 0); Size = UFO(8, 8); }) :: Frame',
-        'local CircleSize = UserInputService.TouchEnabled and 24 or 16\n\tlocal Circle = Add("Frame", { Parent = Button; Name = "Circle"; AnchorPoint = V2(0.5, 0.5); BackgroundColor3 = RGB(220, 218, 218); BorderColor3 = RGB(0, 0, 0); BorderSizePixel = 0; Position = UD2(1, 0, 0.5, 0); Size = UFO(CircleSize, CircleSize); }) :: Frame'
+        'local Circle = Add("Frame", { Parent = Button; Name = "Circle"; AnchorPoint = V2(0.5, 0.5); BackgroundColor3 = RGB(220, 218, 218); BorderColor3 = RGB(0, 0, 0); BorderSizePixel = 0; Position = UD2(1, 0, 0.5, 0); Size = UFO(16, 16); }) :: Frame'
     )
     if not didPatch then warn("[Syllinse] Could not enlarge and center Lumen slider handles") end
     librarySource, didPatch = replaceLibraryText(
@@ -1793,7 +1790,7 @@ local loadOk, LumenOrError = pcall(function()
     librarySource, didPatch = replaceLibraryText(
         librarySource,
         'local SliderGrad = Add("UIGradient", { Parent = Overlay; Color = CS{ CSK(0, Library.Theme.AccentDark), CSK(1, Library.Theme.Accent) }; Rotation = -90; })\n\tLibrary.ThemeLink(SliderGrad, "Gradient", "AccentDark", "Accent")',
-        'local SliderGrad = Add("UIGradient", { Parent = Overlay; Color = CS{ CSK(0, RGB(168, 166, 166)), CSK(1, RGB(214, 212, 212)) }; Rotation = -90; })'
+        'local SliderGrad = Add("UIGradient", { Parent = Overlay; Color = CS{ CSK(0, RGB(134, 132, 132)), CSK(1, RGB(174, 172, 172)) }; Rotation = -90; })'
     )
     if not didPatch then warn("[Syllinse] Could not recolor Lumen slider fill; the upstream source may have changed") end
 
@@ -2485,42 +2482,17 @@ local function attachFeatureNotificationBell(label, toggleControl, featureFlag)
 
     local bell = Instance.new("ImageButton")
     bell.Name = "FeatureNotificationBell_" .. featureFlag
-    local touchScale = math.max(responsiveScaleValue, 0.35)
-    local bellTarget = isTouchDevice and math.ceil(34 / touchScale) or 14
-    bell.Size = UDim2.fromOffset(bellTarget, bellTarget)
+    bell.Size = UDim2.fromOffset(14, 14)
     bell.BackgroundTransparency = 1
     bell.BackgroundColor3 = Theme.SurfaceHover
     bell.BorderSizePixel = 0
     bell.AutoButtonColor = false
-    bell.Image = isTouchDevice and "" or "rbxassetid://10709775704"
+    bell.Image = "rbxassetid://10709775704"
     bell.ImageColor3 = featureNotificationSettings[featureFlag] and Theme.Text or Theme.Dim
     bell.ScaleType = Enum.ScaleType.Fit
     bell.LayoutOrder = 1
     bell.ZIndex = 8
     bell.Parent = rightContent
-
-    local bellGlyph
-    if isTouchDevice then
-        bellGlyph = Instance.new("ImageLabel")
-        bellGlyph.Name = "SyllinseTouchGlyph"
-        bellGlyph.AnchorPoint = Vector2.new(0.5, 0.5)
-        bellGlyph.Position = UDim2.fromScale(0.5, 0.5)
-        local glyphSize = math.ceil(16 / touchScale)
-        bellGlyph.Size = UDim2.fromOffset(glyphSize, glyphSize)
-        bellGlyph.BackgroundTransparency = 1
-        bellGlyph.BorderSizePixel = 0
-        bellGlyph.Image = "rbxassetid://10709775704"
-        bellGlyph.ImageColor3 = bell.ImageColor3
-        bellGlyph.ScaleType = Enum.ScaleType.Fit
-        bellGlyph.ZIndex = bell.ZIndex + 2
-        bellGlyph.Active = false
-        bellGlyph.Parent = bell
-    end
-
-    local function setBellTint(color)
-        bell.ImageColor3 = color
-        if bellGlyph then bellGlyph.ImageColor3 = color end
-    end
 
     -- Keep the bell immediately LEFT of the keybind/settings gear. Other inline
     -- controls (such as a color picker) stay after the bell/gear pair.
@@ -2537,18 +2509,17 @@ local function attachFeatureNotificationBell(label, toggleControl, featureFlag)
 
     bell:SetAttribute("FeatureFlag", featureFlag)
     bell:SetAttribute("Tooltip", "Toggle notifications for " .. tostring(label.Text or featureFlag))
-    addCorner(bell, isTouchDevice and math.ceil(8 / touchScale) or 4)
+    addCorner(bell, 4)
 
     local activeDot = Instance.new("Frame")
     activeDot.Name = "NotificationEnabledDot"
-    local dotSize = isTouchDevice and math.ceil(4 / touchScale) or 4
-    activeDot.Size = UDim2.fromOffset(dotSize, dotSize)
+    activeDot.Size = UDim2.fromOffset(4, 4)
     activeDot.AnchorPoint = Vector2.new(1, 0)
-    activeDot.Position = UDim2.new(1, isTouchDevice and -math.ceil(3 / touchScale) or -1, 0, 0)
+    activeDot.Position = UDim2.new(1, -1, 0, 0)
     activeDot.BackgroundColor3 = Theme.Text
     activeDot.BorderSizePixel = 0
     activeDot.Visible = featureNotificationSettings[featureFlag] == true
-    activeDot.ZIndex = bell.ZIndex + 3
+    activeDot.ZIndex = 9
     activeDot.Parent = bell
     addCorner(activeDot, 4)
 
@@ -2556,17 +2527,17 @@ local function attachFeatureNotificationBell(label, toggleControl, featureFlag)
         local enabled = featureNotificationSettings[featureFlag] == true
         toggleControl.NotifyEnabled = enabled
         featureSettings.FeatureNotifications[featureFlag] = enabled
-        setBellTint(enabled and Theme.Text or Theme.Dim)
+        bell.ImageColor3 = enabled and Theme.Text or Theme.Dim
         activeDot.Visible = enabled
     end
 
     bell.MouseEnter:Connect(function()
         bell.BackgroundTransparency = 0.18
-        setBellTint(Theme.Text)
+        bell.ImageColor3 = Theme.Text
     end)
     bell.MouseLeave:Connect(function()
         bell.BackgroundTransparency = 1
-        setBellTint(featureNotificationSettings[featureFlag] and Theme.Text or Theme.Dim)
+        bell.ImageColor3 = featureNotificationSettings[featureFlag] and Theme.Text or Theme.Dim
     end)
     bell.Activated:Connect(function()
         featureNotificationSettings[featureFlag] = not (featureNotificationSettings[featureFlag] == true)
@@ -3206,16 +3177,10 @@ addToggle(footerBarLabel, {
         PANEL_HEIGHT = enabled and (568 - FOOTER_HEIGHT) or 568
         for _, hosts in pairs(lumenHosts) do
             if hosts.Left and hosts.Left.Parent then
-                hosts.Left.Size = isTouchDevice
-                    and UDim2.new(1, -102, 0, PANEL_HEIGHT)
-                    or UDim2.new(0.5, -48, 0, PANEL_HEIGHT)
+                hosts.Left.Size = UDim2.new(0.5, -48, 0, PANEL_HEIGHT)
             end
             if hosts.Right and hosts.Right.Parent then
-                if isTouchDevice then
-                    hosts.Right.Visible = false
-                else
-                    hosts.Right.Size = UDim2.new(0.5, -48, 0, PANEL_HEIGHT)
-                end
+                hosts.Right.Size = UDim2.new(0.5, -48, 0, PANEL_HEIGHT)
             end
         end
     end;
@@ -3285,103 +3250,6 @@ settingsLeft:Button({
     Callback = function() notify("Settings", "Notification preferences are active.", "Success") end;
 })
 
--- On touch devices, combine both native columns into one vertical scroll per category.
--- The existing category rail remains the tab navigation, avoiding a cramped two-column grid.
-local function applyTouchSingleColumnLayout()
-    if not isTouchDevice then return end
-
-    for _, hosts in pairs(lumenHosts) do
-        local left = hosts.Left
-        local right = hosts.Right
-        if left and right and not left:GetAttribute("SyllinseSingleColumn") then
-            local leftSections = {}
-            local rightSections = {}
-            for _, child in ipairs(left:GetChildren()) do
-                if child:IsA("Frame") and child.Name == "Section" then
-                    table.insert(leftSections, child)
-                end
-            end
-            for _, child in ipairs(right:GetChildren()) do
-                if child:IsA("Frame") and child.Name == "Section" then
-                    table.insert(rightSections, child)
-                end
-            end
-            table.sort(leftSections, function(a, b) return a.LayoutOrder < b.LayoutOrder end)
-            table.sort(rightSections, function(a, b) return a.LayoutOrder < b.LayoutOrder end)
-
-            local order = 0
-            for _, sectionFrame in ipairs(leftSections) do
-                order += 1
-                sectionFrame.LayoutOrder = order
-            end
-            for _, sectionFrame in ipairs(rightSections) do
-                order += 1
-                sectionFrame.Parent = left
-                sectionFrame.LayoutOrder = order
-            end
-
-            left.Position = UDim2.fromOffset(86, PANEL_TOP)
-            left.Size = UDim2.new(1, -102, 0, PANEL_HEIGHT)
-            left.AutomaticCanvasSize = Enum.AutomaticSize.Y
-            left.CanvasSize = UDim2.new(0, 0, 0, 0)
-            left.ScrollingDirection = Enum.ScrollingDirection.Y
-            left.ScrollingEnabled = true
-            left.Active = true
-            left.ClipsDescendants = true
-            local scale = math.max(responsiveScaleValue, 0.35)
-            left.ScrollBarThickness = math.ceil(3 / scale)
-            left.ScrollBarImageTransparency = 0.12
-            left.CanvasPosition = Vector2.new(0, 0)
-            right.Visible = false
-            right.ScrollingEnabled = false
-            hosts.SingleColumn = true
-            left:SetAttribute("SyllinseSingleColumn", true)
-        end
-    end
-end
-applyTouchSingleColumnLayout()
-
--- Preserve icon artwork while enlarging mobile hit areas around gear/action buttons.
-local function expandMobileImageButton(button, targetPixels, glyphPixels)
-    if not isTouchDevice or not button or not button:IsA("ImageButton") then return end
-    if button:GetAttribute("SyllinseTouchTargetExpanded") then return end
-
-    local image = button.Image
-    if image == nil or image == "" then return end
-    local scale = math.max(responsiveScaleValue, 0.35)
-    local targetSize = math.ceil(targetPixels / scale)
-    local glyphSize = math.ceil(glyphPixels / scale)
-    local tint = button.ImageColor3
-    local imageTransparency = button.ImageTransparency
-    local scaleType = button.ScaleType
-    local rectOffset = button.ImageRectOffset
-    local rectSize = button.ImageRectSize
-    local resampleMode = button.ResampleMode
-
-    button.Image = ""
-    button.Size = UDim2.fromOffset(targetSize, targetSize)
-    button.Active = true
-    button:SetAttribute("SyllinseTouchTargetExpanded", true)
-
-    local glyph = Instance.new("ImageLabel")
-    glyph.Name = "SyllinseTouchGlyph"
-    glyph.AnchorPoint = Vector2.new(0.5, 0.5)
-    glyph.Position = UDim2.fromScale(0.5, 0.5)
-    glyph.Size = UDim2.fromOffset(glyphSize, glyphSize)
-    glyph.BackgroundTransparency = 1
-    glyph.BorderSizePixel = 0
-    glyph.Image = image
-    glyph.ImageColor3 = tint
-    glyph.ImageTransparency = imageTransparency
-    glyph.ScaleType = scaleType
-    glyph.ImageRectOffset = rectOffset
-    glyph.ImageRectSize = rectSize
-    glyph.ResampleMode = resampleMode
-    glyph.ZIndex = button.ZIndex + 1
-    glyph.Active = false
-    glyph.Parent = button
-end
-
 local applyPanelTypography
 
 local function applyWindowColor(color)
@@ -3431,11 +3299,10 @@ applyPanelTypography = function(color)
         return false
     end
 
-    local function makeMobileRowTappable(control, sectionFrame, physicalHeight, physicalWidth)
-        if not isTouchDevice or not control or not control:IsA("GuiObject") then return end
+    local function makeMobileRowTappable(control, sectionFrame, physicalHeight)
+        if not showLauncherButton or not control or not control:IsA("GuiObject") then return end
         local scale = math.max(responsiveScaleValue, 0.35)
         local rawHeight = math.ceil(physicalHeight / scale)
-        local rawWidth = physicalWidth and math.ceil(physicalWidth / scale) or nil
         local current = control
         local row
         while current and current ~= sectionFrame do
@@ -3452,16 +3319,8 @@ applyPanelTypography = function(color)
             end
         end
         local controlSize = control.Size
-        local newXOffset = controlSize.X.Offset
-        if rawWidth and controlSize.X.Scale == 0 and newXOffset < rawWidth then
-            newXOffset = rawWidth
-        end
-        local newYOffset = controlSize.Y.Offset
-        if controlSize.Y.Scale == 0 and newYOffset < rawHeight then
-            newYOffset = rawHeight
-        end
-        if newXOffset ~= controlSize.X.Offset or newYOffset ~= controlSize.Y.Offset then
-            control.Size = UDim2.new(controlSize.X.Scale, newXOffset, controlSize.Y.Scale, newYOffset)
+        if controlSize.Y.Scale == 0 and controlSize.Y.Offset < rawHeight then
+            control.Size = UDim2.new(controlSize.X.Scale, controlSize.X.Offset, 0, rawHeight)
         end
     end
 
@@ -3531,8 +3390,8 @@ applyPanelTypography = function(color)
                     -- Give mobile users a taller row for switches and keybind/action controls.
                     -- The row grows with the target so it does not overlap the control below it.
                     if descendant.Name == "Toggle" then
-                        makeMobileRowTappable(descendant, frame, 36, 38)
-                        if isTouchDevice then
+                        makeMobileRowTappable(descendant, frame, 30)
+                        if showLauncherButton then
                             local scale = math.max(responsiveScaleValue, 0.35)
                             local minSwitchWidth = math.ceil(38 / scale)
                             local minSwitchHeight = math.ceil(25 / scale)
@@ -3545,9 +3404,9 @@ applyPanelTypography = function(color)
                             )
                         end
                     elseif descendant.Name == "KeyButton" then
-                        makeMobileRowTappable(descendant, frame, 36, 34)
+                        makeMobileRowTappable(descendant, frame, 30)
                     elseif descendant.Name == "Click" then
-                        makeMobileRowTappable(descendant, frame, 36, 34)
+                        makeMobileRowTappable(descendant, frame, 32)
                     end
                     if descendant.Name ~= "Click" then
                         if inDropdown and descendant.Name == "Input" then
@@ -3566,47 +3425,16 @@ applyPanelTypography = function(color)
                         descendant.TextSize = math.clamp(descendant.TextSize, 15, 16)
                     end
                 elseif descendant:IsA("ImageLabel") or descendant:IsA("ImageButton") then
-                    local bellFlag = descendant.Name == "SyllinseTouchGlyph"
-                        and descendant.Parent
-                        and descendant.Parent:GetAttribute("FeatureFlag")
-                    if bellFlag then
-                        descendant.ImageColor3 = featureNotificationSettings[bellFlag] and Theme.Text or Theme.Dim
-                    elseif descendant:IsA("ImageButton") and descendant.Name == "Settings" then
-                        expandMobileImageButton(descendant, 34, 16)
-                        makeMobileRowTappable(descendant, frame, 34, 34)
-                        local touchGlyph = descendant:FindFirstChild("SyllinseTouchGlyph")
-                        if touchGlyph and touchGlyph:IsA("ImageLabel") then
-                            touchGlyph.ImageColor3 = iconColor
-                        end
-                    elseif isTouchDevice and descendant:IsA("ImageLabel") and descendant.Name == "Icon" and inDropdown then
-                        -- The dropdown frame itself is active; make its arrow visible at mobile scale.
-                        local scale = math.max(responsiveScaleValue, 0.35)
-                        local glyphSize = math.ceil(16 / scale)
-                        descendant.Size = UDim2.fromOffset(glyphSize, glyphSize)
-                        descendant.ImageColor3 = iconColor
-                    elseif name == "sliderbar" then
+                    if name == "sliderbar" then
                         descendant.ImageColor3 = Theme.SliderTrack
                     else
                         descendant.ImageColor3 = iconColor
                     end
                 elseif descendant:IsA("Frame") then
-                    if isTouchDevice and name == "inputframe" then
-                        local scale = math.max(responsiveScaleValue, 0.35)
-                        local touchHeight = math.ceil(34 / scale)
-                        local frameSize = descendant.Size
-                        if frameSize.Y.Scale == 0 and frameSize.Y.Offset < touchHeight then
-                            descendant.Size = UDim2.new(frameSize.X.Scale, frameSize.X.Offset, 0, touchHeight)
-                        end
-                        descendant.Active = true
-                    end
                     if name == "button" and descendant.Parent and descendant.Parent.Name == "SliderFrame" then
                         descendant.BackgroundColor3 = Theme.SliderTrack
                     elseif name == "circle" then
                         descendant.BackgroundColor3 = Theme.SliderHandle
-                    elseif name == "overlay" and descendant.Parent and descendant.Parent.Name == "Button"
-                        and descendant.Parent.Parent and descendant.Parent.Parent.Name == "SliderFrame" then
-                        descendant.BackgroundColor3 = Theme.SliderFill
-                        descendant.BackgroundTransparency = 0
                     end
                 end
             end
