@@ -1,6 +1,6 @@
 --[[
     Syllinse shell + Lumen controls
-    v46: original desktop-proportioned shell, fitted to the full mobile safe area without stretching or clipping.
+    v48: maximum safe-area fit for the original 980x670 desktop-proportioned shell; no cropping.
     Original Syllinse + native Lumen visual system preserved.
     MacLib-inspired mobile scroll guard, responsive touch layout, and optional keybind actions.
     No MacLib replacement window or duplicate widget system is loaded.
@@ -248,21 +248,24 @@ local function updateScale()
     baseWindowSize = root.Size
 
     local touchDevice = touchInputEnabled
-    -- A small floating margin remains visible around the window, without wasting
-    -- extra screen space. The full safe area is included before calculating scale.
-    local horizontalMargin = touchDevice and 10 or 18
-    local verticalMargin = touchDevice and 10 or 18
+    -- Use the maximum safe display area. Keep only a 4px mobile edge gap so the
+    -- shell can grow as large as possible without touching/crossing the screen edge.
+    local horizontalMargin = touchDevice and 4 or 18
+    local verticalMargin = touchDevice and 4 or 18
     local availableWidth = math.max(1,
         viewport.X - safeLeft - safeRight - horizontalMargin * 2)
     local availableHeight = math.max(1,
         viewport.Y - safeTop - safeBottom - verticalMargin * 2)
 
-    -- Use the limiting axis so BOTH dimensions always fit. On a phone in landscape
-    -- this usually fits by height; in portrait it usually fits by width. The unused
-    -- space stays as margin rather than being filled by stretching or cropping.
+    -- Uniformly scale the complete 980x670 desktop shell by the tighter axis.
+    -- This is the largest scale at which the FULL window fits in both dimensions:
+    -- no stretching, no portrait redesign, and no top/bottom/side cropping.
     local fittedScale = math.min(availableWidth / 980, availableHeight / 670)
-    local maximumScale = touchDevice and 1.5 or 1
-    responsiveScaleValue = math.max(0.001, math.min(fittedScale, maximumScale)) * windowSizeMultiplier
+    -- Mobile always uses the maximum fitted size. The desktop UI-size preference
+    -- remains available on PC, but cannot silently shrink the phone window.
+    local sizeMultiplier = touchDevice and 1 or windowSizeMultiplier
+    local maximumScale = touchDevice and fittedScale or math.min(fittedScale, 1)
+    responsiveScaleValue = math.max(0.001, maximumScale) * sizeMultiplier
 
     -- Center inside the safe rectangle, not the raw display rectangle.
     mobileSafeOffsetY = math.floor((safeTop - safeBottom) / 2)
@@ -314,7 +317,7 @@ local function updateScale()
             local activeCamera = Workspace.CurrentCamera
             local viewportNow = activeCamera and activeCamera.ViewportSize or gui.AbsoluteSize
             local currentSize = root.AbsoluteSize
-            local margin = touchDevice and 10 or 18
+            local margin = touchDevice and 4 or 18
             local minX = safeLeft + currentSize.X / 2 + margin
             local maxX = viewportNow.X - safeRight - currentSize.X / 2 - margin
             local minY = safeTop + currentSize.Y / 2 + margin
