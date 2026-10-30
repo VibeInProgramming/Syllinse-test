@@ -180,7 +180,7 @@ end
 local root = makeFrame(
     "Window",
     gui,
-    UDim2.fromOffset(940, 650),
+    UDim2.fromOffset(980, 670),
     UDim2.fromScale(0.5, 0.5),
     Theme.Root
 )
@@ -214,7 +214,7 @@ windowMotionFactor.Changed:Connect(function(value)
 end)
 root.Visible = false -- shown by the initial Syllinse-branded opening transition near the end
 
--- Responsive viewport fit. Keep the exact same 940x650 desktop canvas on every device.
+-- Responsive viewport fit. Keep the exact same 980x670 desktop canvas on every device.
 -- Touch devices scale the complete shell as one unit into the safe viewport; they never
 -- switch to a second, rearranged mobile layout. This preserves the sidebar, header,
 -- search/profile row, two content columns, and footer proportions.
@@ -241,10 +241,10 @@ local function updateScale()
         end
     end
 
-    -- Keep the original 940x650 Syllinse desktop canvas on every device.
+    -- Keep the original 980x670 Syllinse desktop canvas on every device.
     -- UIScale fits the complete shell proportionally; it does not stretch the
     -- shell, rearrange the panels, or crop its top / bottom edges.
-    root.Size = UDim2.fromOffset(940, 650)
+    root.Size = UDim2.fromOffset(980, 670)
     baseWindowSize = root.Size
 
     local touchDevice = touchInputEnabled
@@ -260,7 +260,7 @@ local function updateScale()
     -- Use the limiting axis so BOTH dimensions always fit. On a phone in landscape
     -- this usually fits by height; in portrait it usually fits by width. The unused
     -- space stays as margin rather than being filled by stretching or cropping.
-    local fittedScale = math.min(availableWidth / 940, availableHeight / 650)
+    local fittedScale = math.min(availableWidth / 980, availableHeight / 670)
     local maximumScale = touchDevice and 1.5 or 1
     responsiveScaleValue = math.max(0.001, math.min(fittedScale, maximumScale)) * windowSizeMultiplier
 
@@ -3680,11 +3680,11 @@ SyllinseRuntime.watchOuterMobileScrollFrames(Lumen._Instance)
 SyllinseRuntime.watchOuterMobileScrollFrames(Lumen._Overlay)
 
 -- Responsive shell layout. Every device uses the authored desktop composition.
--- updateScale() scales this complete 940x650 canvas into the available screen area.
+-- updateScale() scales this complete 980x670 canvas into the available screen area.
 layoutResponsiveShell = function()
     if not root or not root.Parent then return end
 
-    local canvasW, canvasH = 940, 650
+    local canvasW, canvasH = 980, 670
     local railWidth = 77
     compactTouchLayout = false
     PANEL_TOP = 73
