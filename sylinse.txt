@@ -1,6 +1,6 @@
 --[[
     Syllinse shell + Lumen controls
-    v29: fixes Lumen toggle off-state contrast; inactive switches use visible charcoal gray.
+    v40: shell opens fully opaque from the first frame with a subtle centered scale; launcher position stays fixed.
     Original Syllinse + native Lumen visual system preserved.
     MacLib-inspired mobile scroll guard, responsive touch layout, and optional keybind actions.
     No MacLib replacement window or duplicate widget system is loaded.
@@ -14,6 +14,8 @@
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local touchInputEnabled = UserInputService.TouchEnabled
+-- Keep the launch button mobile-only. Touch-first checks for control sizing are evaluated
+-- inline below so this long single chunk does not consume extra Luau local registers.
 local showLauncherButton = touchInputEnabled and not UserInputService.KeyboardEnabled
 local TweenService = game:GetService("TweenService")
 local ContentProvider = game:GetService("ContentProvider")
@@ -42,6 +44,7 @@ end
 local FONT_REGULAR = Font.new("rbxasset://fonts/families/BuilderSans.json", Enum.FontWeight.Regular)
 local FONT_MEDIUM = Font.new("rbxasset://fonts/families/BuilderSans.json", Enum.FontWeight.Medium)
 local FONT_SEMIBOLD = Font.new("rbxasset://fonts/families/BuilderSans.json", Enum.FontWeight.SemiBold)
+local FONT_BOLD = Font.new("rbxasset://fonts/families/BuilderSans.json", Enum.FontWeight.Bold)
 
 local Theme = {
     -- Warm charcoal palette with clearer, neutral grayscale text.
@@ -63,6 +66,9 @@ local Theme = {
     PanelIcon = Color3.fromRGB(170, 168, 168),
     PanelValue = Color3.fromRGB(128, 126, 126),
     SliderTrack = Color3.fromRGB(64, 62, 62),
+    -- Toggle off-state is deliberately lighter than the slider rail so it cannot read as black.
+    ToggleOffTrack = Color3.fromRGB(78, 76, 76),
+    ToggleOffThumb = Color3.fromRGB(145, 143, 143),
     SliderHead = Color3.fromRGB(112, 110, 110),
     SliderHandle = Color3.fromRGB(194, 192, 192),
     Muted = Color3.fromRGB(139, 137, 137),
@@ -181,18 +187,24 @@ local root = makeFrame(
 root.AnchorPoint = Vector2.new(0.5, 0.5)
 root.ClipsDescendants = true
 addCorner(root, 18)
-local shellStroke = addStroke(root, Theme.Stroke, 0.12, 1)
+local shellStroke = addStroke(root, Theme.Stroke, 1, 1) -- No animated outline; premium motion uses a soft interior light sweep.
 
 local uiScale = Instance.new("UIScale")
 uiScale.Name = "ResponsiveScale"
 uiScale.Parent = root
 
 -- Keep one UIScale and combine its viewport fit with the motion factor. This avoids
--- competing UIScale modifiers while allowing the same smooth scale morph on all screens.
+-- competing UIScale modifiers while allowing a subtle, centered open/close scale.
 local responsiveScaleValue = 1
+-- Keep the desktop shell comfortably compact by default while touch-only devices
+-- retain a full-size, screen-fitted layout. The Settings slider adjusts this multiplier.
+local windowSizePercent = 100 -- Start at full size on both PC and mobile; updateScale() automatically fits the viewport.
+local windowSizeMultiplier = windowSizePercent / 100
 local compactTouchLayout = false
 local mobileSafeOffsetY = 0
 local baseWindowSize
+-- Once manually dragged, preserve the shell position across close/open cycles.
+local windowHasCustomPosition = false
 local layoutResponsiveShell
 local windowMotionFactor = Instance.new("NumberValue")
 windowMotionFactor.Name = "WindowMotionFactor"
@@ -219,16 +231,95 @@ local function updateScale()
         local usableHeight = viewport.Y - topInset - 12
         local fittedHeight = math.min(650, math.max(220, usableHeight))
         root.Size = UDim2.fromOffset(fittedWidth, fittedHeight)
-        root.Position = UDim2.new(0.5, 0, 0.5, mobileSafeOffsetY)
-        responsiveScaleValue = 1
+        if not windowHasCustomPosition then
+            root.Position = UDim2.new(0.5, 0, 0.5, mobileSafeOffsetY)
+        end
+        responsiveScaleValue = math.clamp(windowSizeMultiplier, 0.55, 1)
     else
         root.Size = UDim2.fromOffset(940, 650)
-        local fittedScale = math.min(viewport.X / 960, viewport.Y / 684)
-        responsiveScaleValue = math.clamp(fittedScale, 0.55, 1)
+        if not windowHasCustomPosition then
+            root.Position = UDim2.fromScale(0.5, 0.5)
+        end
+        -- Fit the 940x650 shell inside the current PC viewport with a small safety margin.
+        -- Recalculated on viewport changes, this keeps the whole window on-screen at
+        -- smaller resolutions while still honoring the user's 70-100% Settings slider.
+        local availableWidth = math.max(240, viewport.X - 28)
+        local availableHeight = math.max(220, viewport.Y - 36)
+        local fittedScale = math.min(availableWidth / 940, availableHeight / 650, 1)
+        responsiveScaleValue = math.clamp(fittedScale, 0.25, 1) * windowSizeMultiplier
     end
 
     if baseWindowSize then baseWindowSize = root.Size end
     uiScale.Scale = responsiveScaleValue * windowMotionFactor.Value
+
+    -- Keep switch controls at a consistent physical size even when the main window
+    -- is scaled down. Their own UIScale cancels the shell's ResponsiveScale, while
+    -- their owning rows grow in logical space to prevent switches colliding vertically.
+    local switchCompensationScale = 1 / math.max(responsiveScaleValue, 0.25)
+    for _, switchTrack in ipairs(gui:GetDescendants()) do
+        if switchTrack:IsA("GuiButton") and switchTrack.Name == "Toggle"
+            and switchTrack:GetAttribute("SyllinseBaseSwitchWidth") then
+            local switchScale = switchTrack:FindFirstChild("SyllinseSwitchScaleCompensation")
+            if switchScale and switchScale:IsA("UIScale") then
+                switchScale.Scale = switchCompensationScale
+            end
+
+            local switchRow = switchTrack.Parent
+            while switchRow and switchRow ~= root do
+                if switchRow.Name == "LabelFrame" then
+                    local baseHeight = switchRow:GetAttribute("SyllinseToggleBaseRowHeight")
+                    if type(baseHeight) == "number" and switchRow.Size.Y.Scale == 0 then
+                        local minimumPhysicalHeight = (touchInputEnabled and not UserInputService.KeyboardEnabled) and 40 or 24
+                        local targetHeight = math.max(baseHeight, minimumPhysicalHeight / math.max(responsiveScaleValue, 0.25))
+                        switchRow.Size = UDim2.new(switchRow.Size.X.Scale, switchRow.Size.X.Offset, 0, math.ceil(targetHeight))
+                        switchRow.ClipsDescendants = false
+                    end
+                    break
+                end
+                switchRow = switchRow.Parent
+            end
+        end
+    end
+
+    -- If the viewport shrinks after the shell was dragged, bring it back far enough
+    -- that the top-right drag icon remains usable instead of leaving it off-screen.
+    if windowHasCustomPosition then
+        task.defer(function()
+            if not root.Parent then return end
+            local activeCamera = Workspace.CurrentCamera
+            local viewportNow = activeCamera and activeCamera.ViewportSize or gui.AbsoluteSize
+            local currentSize = root.AbsoluteSize
+            local controls = header and header:FindFirstChild("DragButton")
+            local controlWidth = controls and controls.AbsoluteSize.X or 48
+            local minX = 8 - currentSize.X / 2 + 6 + controlWidth
+            local maxX = viewportNow.X - currentSize.X / 2 - 8
+            if minX > maxX then
+                maxX = viewportNow.X - currentSize.X / 2 + 2
+                minX = math.min(minX, maxX)
+            end
+            -- Match the right-edge rule: keep the ENTIRE shell below the top margin.
+            -- The lower edge may extend off-screen, as long as the drag handle stays reachable.
+            local controlHeight = controls and controls.AbsoluteSize.Y or 48
+            local controlOffsetY = controls and (controls.AbsolutePosition.Y - root.AbsolutePosition.Y) or 9
+            local minY = 8 + currentSize.Y / 2
+            local maxY = viewportNow.Y - 8 - controlOffsetY - controlHeight + currentSize.Y / 2
+            local cx = viewportNow.X * root.Position.X.Scale + root.Position.X.Offset
+            local cy = viewportNow.Y * root.Position.Y.Scale + root.Position.Y.Offset
+            cx = math.clamp(cx, minX, maxX)
+            if maxY < minY then
+                -- If the viewport is too short to satisfy both edges, prioritize keeping
+                -- the shell's top edge stable and visible instead of snapping to the center.
+                cy = minY
+            else
+                cy = math.clamp(cy, minY, maxY)
+            end
+            root.Position = UDim2.new(
+                root.Position.X.Scale, cx - viewportNow.X * root.Position.X.Scale,
+                root.Position.Y.Scale, cy - viewportNow.Y * root.Position.Y.Scale
+            )
+        end)
+    end
+
     if layoutResponsiveShell then task.defer(layoutResponsiveShell) end
 end
 
@@ -250,12 +341,40 @@ addCorner(sidebar, 18) -- Prevent the sidebar fill from squaring off the outer w
 local sideDivider = makeFrame("SidebarDivider", root, UDim2.new(0, 1, 1, 0), UDim2.fromOffset(76, 0), Theme.Divider)
 sideDivider.BackgroundTransparency = 0.15
 
+-- Soft brand-colored bloom behind the S logo only (not a glow around the whole sidebar).
+-- Slightly broader cyan-teal and violet-magenta layers echo the logo's own gradient.
+local logoGlowCyan = Instance.new("ImageLabel")
+logoGlowCyan.Name = "SyllinseLogoGlowCyan"
+logoGlowCyan.BackgroundTransparency = 1
+logoGlowCyan.BorderSizePixel = 0
+logoGlowCyan.Position = UDim2.fromOffset(-13, -11)
+logoGlowCyan.Size = UDim2.fromOffset(102, 102)
+logoGlowCyan.Image = "rbxassetid://8992230677"
+logoGlowCyan.ImageColor3 = Color3.fromRGB(28, 158, 170)
+logoGlowCyan.ImageTransparency = 0.89
+logoGlowCyan.ScaleType = Enum.ScaleType.Fit
+logoGlowCyan.ZIndex = 1
+logoGlowCyan.Parent = sidebar
+
+local logoGlowViolet = Instance.new("ImageLabel")
+logoGlowViolet.Name = "SyllinseLogoGlowViolet"
+logoGlowViolet.BackgroundTransparency = 1
+logoGlowViolet.BorderSizePixel = 0
+logoGlowViolet.Position = UDim2.fromOffset(-10, -9)
+logoGlowViolet.Size = UDim2.fromOffset(98, 100)
+logoGlowViolet.Image = "rbxassetid://8992230677"
+logoGlowViolet.ImageColor3 = Color3.fromRGB(132, 54, 179)
+logoGlowViolet.ImageTransparency = 0.91
+logoGlowViolet.ScaleType = Enum.ScaleType.Fit
+logoGlowViolet.ZIndex = 1
+logoGlowViolet.Parent = sidebar
+
 -- Use the exact Syllinse logo asset. We try the content ID first, then Roblox's
 -- thumbnail URI as a fallback in case the supplied ID points to a decal wrapper.
 local logo = Instance.new("ImageLabel")
 logo.Name = "Logo"
-logo.Size = UDim2.fromOffset(88, 96)
-logo.Position = UDim2.fromOffset(-5, -7)
+logo.Size = UDim2.fromOffset(92, 100)
+logo.Position = UDim2.fromOffset(-7, -9)
 logo.BackgroundTransparency = 1
 logo.BorderSizePixel = 0
 logo.Image = ""
@@ -825,7 +944,10 @@ for itemIndex, item in ipairs(navItems) do
     addCorner(button, 13)
 
     local outline = addStroke(button, Theme.Stroke, 1, 1)
-    -- Hover animation is deliberately limited to sidebar tab buttons (not Lumen controls).
+    -- Keep the tab button as an invisible click target: no outline or hover tile is rendered.
+    outline.Enabled = false
+    button.BackgroundTransparency = 1
+    -- Hover animation is deliberately limited to sidebar icons/labels (not Lumen controls).
     local hoverScale = Instance.new("UIScale")
     hoverScale.Name = "TabHoverScale"
     hoverScale.Scale = 1
@@ -861,11 +983,13 @@ for itemIndex, item in ipairs(navItems) do
     -- Keep Configs and Visuals terminology labels using the same vertical adjustment.
     -- Snap labels to whole-pixel coordinates for crisp text rendering.
     local terminologyLabelOffsetY = (item.Name == "Configs" or item.Name == "Visuals") and 0 or 4
-    local terminologyLabelPositionY = math.floor(terminologyLabelY + terminologyLabelOffsetY + 0.5)
+    -- Move only the Settings terminology label a few pixels upward.
+    local settingsTerminologyOffsetY = item.Name == "Settings" and -3 or 0
+    local terminologyLabelPositionY = math.floor(terminologyLabelY + terminologyLabelOffsetY + settingsTerminologyOffsetY + 0.5)
     terminologyLabel.Position = UDim2.fromOffset(38.5, terminologyLabelPositionY)
     -- Match the odd-width sidebar so the centered label's left edge lands on a whole pixel.
     terminologyLabel.Size = UDim2.fromOffset(77, 18)
-    terminologyLabel.FontFace = FONT_SEMIBOLD
+    terminologyLabel.FontFace = FONT_BOLD
     terminologyLabel.Text = item.Name
     -- A slightly larger native-size glyph is easier to read than shrinking 13px text.
     -- TextScaled remains off so Roblox does not auto-fit and resample the lettering.
@@ -909,9 +1033,12 @@ for itemIndex, item in ipairs(navItems) do
             tween(hoverScale, 0.16, { Scale = isHovered and 1.04 or 1 })
         end
 
+        -- Never draw a tile or hitbox around a sidebar tab. Only the icon and its
+        -- optional terminology label react to hover, while the transparent button
+        -- continues to handle clicks/taps normally.
+        button.BackgroundTransparency = 1
         if isHovered then
             if item.Name ~= activeName then
-                tween(button, 0.14, { BackgroundColor3 = Theme.SurfaceHover, BackgroundTransparency = 0.58 })
                 if icon then tween(icon, 0.14, { ImageColor3 = Theme.IconHover }) end
                 tween(terminologyLabel, 0.14, { TextColor3 = terminologyTint(Theme.IconHover, 0.86) })
             else
@@ -919,7 +1046,6 @@ for itemIndex, item in ipairs(navItems) do
             end
         else
             if item.Name ~= activeName then
-                tween(button, 0.14, { BackgroundColor3 = Theme.Root, BackgroundTransparency = 1 })
                 if icon then tween(icon, 0.14, { ImageColor3 = Theme.IconIdle }) end
                 tween(terminologyLabel, 0.14, { TextColor3 = Theme.IconIdle })
             else
@@ -976,7 +1102,7 @@ for itemIndex, item in ipairs(navItems) do
         BaseButtonHeight = navTapSize,
         BaseButtonX = 15,
         BaseY = item.Y,
-        TerminologyLabelY = math.floor(terminologyLabelY + terminologyLabelOffsetY + 0.5),
+        TerminologyLabelY = terminologyLabelPositionY,
         BaseIconSize = item.IconSize or 64,
         Hovering = false,
     }
@@ -997,6 +1123,9 @@ dragHandle.BackgroundTransparency = 1
 dragHandle.BorderSizePixel = 0
 dragHandle.Text = ""
 dragHandle.AutoButtonColor = false
+-- The blank title area is layout-only: dragging is available exclusively via DragButton.
+dragHandle.Active = false
+dragHandle.Selectable = false
 dragHandle.ZIndex = 1
 dragHandle.Parent = header
 
@@ -1030,7 +1159,7 @@ headerTitle = makeText(
     "ActiveTitle", header, "Combat",
     UDim2.new(0, 250, 0, 34),
     UDim2.fromOffset(47, 19), 18,
-    Theme.PanelTitle, FONT_MEDIUM
+    Theme.PanelTitle, FONT_BOLD
 )
 headerTitle.ZIndex = 3
 
@@ -1068,7 +1197,7 @@ searchBox.Parent = searchFrame
 local avatar = Instance.new("ImageLabel")
 avatar.Name = "Avatar"
 avatar.Size = UDim2.fromOffset(42, 42)
-avatar.Position = UDim2.new(1, -364, 0, 15)
+avatar.Position = UDim2.new(1, -354, 0, 15)
 avatar.BackgroundColor3 = Theme.SurfaceHover
 avatar.BorderSizePixel = 0
 avatar.Image = ""
@@ -1091,30 +1220,72 @@ task.spawn(function()
     end
 end)
 
--- Theme-matched close button in the top-right corner.
--- It animates the Syllinse shell closed while keeping the Lumen backend and overlay alive.
-local closeButton = Instance.new("TextButton")
-closeButton.Name = "CloseButton"
-closeButton.AnchorPoint = Vector2.new(1, 0)
-closeButton.Position = UDim2.new(1, -10, 0, 15)
-closeButton.Size = UDim2.fromOffset(38, 38)
-closeButton.BackgroundColor3 = Theme.SurfaceHover
-closeButton.BackgroundTransparency = 1
-closeButton.BorderSizePixel = 0
-closeButton.Text = "×"
-closeButton.AutoLocalize = false
-closeButton.TextColor3 = Theme.Muted
-closeButton.TextSize = 34
-closeButton.FontFace = FONT_SEMIBOLD
-closeButton.AutoButtonColor = false
-closeButton.ZIndex = 8
-closeButton.Parent = header
-addCorner(closeButton, 10)
-local closeStroke = addStroke(closeButton, Theme.Stroke, 1, 1)
+-- Replace the original X in-place with a cleaner MacLib-inspired four-way move glyph.
+-- Keep the original button position/hitbox; use rounded UI-vector strokes so the icon stays crisp.
+local dragButton = Instance.new("ImageButton")
+dragButton.Name = "DragButton"
+dragButton.AnchorPoint = Vector2.new(1, 0)
+dragButton.Position = UDim2.new(1, -6, 0, 9)
+-- Larger 48x48 hit target makes the drag handle easier to grab without enlarging the artwork.
+dragButton.Size = UDim2.fromOffset(48, 48)
+dragButton.BackgroundColor3 = Theme.SurfaceHover
+dragButton.BackgroundTransparency = 1
+dragButton.BorderSizePixel = 0
+dragButton.Image = ""
+dragButton.AutoButtonColor = false
+dragButton.Active = true
+dragButton.Selectable = false
+dragButton.ZIndex = 8
+dragButton.Parent = header
+addCorner(dragButton, 10)
+local dragButtonStroke = addStroke(dragButton, Theme.Stroke, 1, 1)
+ dragButtonStroke.Enabled = false -- Invisible hit area: no hover outline is ever rendered.
+-- Recreate MacLib's four-way transform/move glyph with vector UI strokes.
+-- This keeps the same icon style without scaling a low-resolution raster asset.
+local dragGlyph = Instance.new("Frame")
+dragGlyph.Name = "DragGlyph"
+dragGlyph.AnchorPoint = Vector2.new(0.5, 0.5)
+dragGlyph.Position = UDim2.fromScale(0.5, 0.5)
+dragGlyph.Size = UDim2.fromOffset(26, 26)
+dragGlyph.BackgroundTransparency = 1
+dragGlyph.BorderSizePixel = 0
+dragGlyph.ZIndex = 9
+dragGlyph.Parent = dragButton
 
--- Magik Society-style window morph, adapted to Syllinse's neutral charcoal theme.
--- The main window expands out of a compact, draggable Syllinse launcher pill; closing
--- it collapses the window back into that same pill while the content fades away.
+local dragGlyphStrokes = {}
+do
+    local function addDragStroke(name, x1, y1, x2, y2)
+        local dx, dy = x2 - x1, y2 - y1
+        local stroke = Instance.new("Frame")
+        stroke.Name = name
+        stroke.AnchorPoint = Vector2.new(0.5, 0.5)
+        stroke.Position = UDim2.fromOffset((x1 + x2) / 2, (y1 + y2) / 2)
+        stroke.Size = UDim2.fromOffset(math.sqrt(dx * dx + dy * dy), 2)
+        stroke.Rotation = math.deg(math.atan2(dy, dx))
+        stroke.BackgroundColor3 = Theme.Muted
+        stroke.BorderSizePixel = 0
+        stroke.ZIndex = 10
+        local cap = Instance.new("UICorner")
+        cap.CornerRadius = UDim.new(1, 0)
+        cap.Parent = stroke
+        stroke.Parent = dragGlyph
+        table.insert(dragGlyphStrokes, stroke)
+    end
+
+    -- Cross-shaped shafts with four clean, symmetrical arrowheads (MacLib transform style).
+    addDragStroke("HorizontalStem", 3, 13, 23, 13)
+    addDragStroke("VerticalStem", 13, 3, 13, 23)
+    addDragStroke("UpLeft", 9, 7, 13, 3)
+    addDragStroke("UpRight", 13, 3, 17, 7)
+    addDragStroke("DownLeft", 9, 19, 13, 23)
+    addDragStroke("DownRight", 13, 23, 17, 19)
+    addDragStroke("LeftTop", 7, 9, 3, 13)
+    addDragStroke("LeftBottom", 3, 13, 7, 17)
+    addDragStroke("RightTop", 19, 9, 23, 13)
+    addDragStroke("RightBottom", 23, 13, 19, 17)
+end
+
+-- Centered open/close animation. The outer shell surface stays opaque; the interior content and sweep animate independently.
 baseWindowSize = root.Size
 local motionBody = Instance.new("CanvasGroup")
 motionBody.Name = "WindowMotionBody"
@@ -1122,11 +1293,11 @@ motionBody.Size = UDim2.fromScale(1, 1)
 motionBody.Position = UDim2.fromScale(0, 0)
 motionBody.BackgroundTransparency = 1
 motionBody.BorderSizePixel = 0
-motionBody.GroupTransparency = 1
+motionBody.GroupTransparency = 0
 motionBody.ZIndex = 1
 motionBody.Parent = root
 
-local CLOSED_SURFACE = Color3.fromRGB(18, 18, 18)
+local CLOSED_SURFACE = Theme.Root -- Keep the launcher surface matched to the shell theme.
 local LAUNCHER_HEIGHT = 58
 
 -- Launcher logo size is independent from the compact square button.
@@ -1134,27 +1305,65 @@ local LAUNCHER_LOGO_SIZE = 56
 local LAUNCHER_WIDTH = 58
 local LAUNCHER_SIZE = Vector2.new(LAUNCHER_WIDTH, LAUNCHER_HEIGHT)
 
--- Soft monochrome bloom placed behind the launcher. It follows the pill when dragged
--- and brightens on hover, staying within the Syllinse charcoal/gray palette.
+-- Light bloom layer used behind the launcher logo; it is reparented under the button below.
 local launcherGlow = Instance.new("ImageLabel")
 launcherGlow.Name = "SyllinseLauncherGlow"
 launcherGlow.AnchorPoint = Vector2.new(0.5, 0.5)
 launcherGlow.Position = UDim2.fromScale(0.5, 0.5)
-launcherGlow.Size = UDim2.fromOffset(LAUNCHER_SIZE.X + 40, 90)
+launcherGlow.Size = UDim2.fromOffset(54, 54)
 launcherGlow.BackgroundTransparency = 1
 launcherGlow.BorderSizePixel = 0
 launcherGlow.Image = "rbxassetid://8992230677"
 launcherGlow.ImageColor3 = Theme.Accent
-launcherGlow.ImageTransparency = 0.82
+launcherGlow.ImageTransparency = 0.97
 launcherGlow.ScaleType = Enum.ScaleType.Fit
 launcherGlow.ZIndex = 199
 launcherGlow.Parent = gui
 launcherGlow.Visible = showLauncherButton
 
+-- Cyan/violet logo glow layers. They are reparented behind the launcher logo below;
+-- the shell logo glow remains untouched.
+local launcherGlowCyan = Instance.new("ImageLabel")
+launcherGlowCyan.Name = "SyllinseLauncherGlowCyan"
+launcherGlowCyan.AnchorPoint = Vector2.new(0.5, 0.5)
+launcherGlowCyan.Position = UDim2.fromScale(0.5, 0.5)
+launcherGlowCyan.Size = UDim2.fromOffset(58, 58)
+launcherGlowCyan.BackgroundTransparency = 1
+launcherGlowCyan.BorderSizePixel = 0
+launcherGlowCyan.Image = "rbxassetid://8992230677"
+launcherGlowCyan.ImageColor3 = Color3.fromRGB(28, 158, 170)
+launcherGlowCyan.ImageTransparency = 0.91
+launcherGlowCyan.ScaleType = Enum.ScaleType.Fit
+launcherGlowCyan.ZIndex = 197
+launcherGlowCyan.Parent = gui
+launcherGlowCyan.Visible = showLauncherButton
+
+local launcherGlowViolet = Instance.new("ImageLabel")
+launcherGlowViolet.Name = "SyllinseLauncherGlowViolet"
+launcherGlowViolet.AnchorPoint = Vector2.new(0.5, 0.5)
+launcherGlowViolet.Position = UDim2.fromScale(0.5, 0.5)
+launcherGlowViolet.Size = UDim2.fromOffset(56, 56)
+launcherGlowViolet.BackgroundTransparency = 1
+launcherGlowViolet.BorderSizePixel = 0
+launcherGlowViolet.Image = "rbxassetid://8992230677"
+launcherGlowViolet.ImageColor3 = Color3.fromRGB(132, 54, 179)
+launcherGlowViolet.ImageTransparency = 0.93
+launcherGlowViolet.ScaleType = Enum.ScaleType.Fit
+launcherGlowViolet.ZIndex = 198
+launcherGlowViolet.Parent = gui
+launcherGlowViolet.Visible = showLauncherButton
+
 local launcher = Instance.new("TextButton")
 launcher.Name = "SyllinseOpenButton"
 launcher.AnchorPoint = Vector2.new(0.5, 0.5)
-launcher.Position = UDim2.fromScale(0.5, 0.5)
+-- Start the launcher just above the shell instead of in the middle of its controls.
+-- Once the user drags it, its saved position is left untouched by window transitions.
+local initialShellTop = root.AbsolutePosition.Y
+local initialLauncherY = initialShellTop - (LAUNCHER_HEIGHT / 2) - 10
+if initialLauncherY < LAUNCHER_HEIGHT / 2 + 8 then
+    initialLauncherY = LAUNCHER_HEIGHT / 2 + 8
+end
+launcher.Position = UDim2.fromOffset(gui.AbsoluteSize.X / 2, initialLauncherY)
 launcher.Size = UDim2.fromOffset(LAUNCHER_SIZE.X, LAUNCHER_SIZE.Y)
 launcher.BackgroundColor3 = CLOSED_SURFACE
 launcher.BorderSizePixel = 0
@@ -1165,9 +1374,72 @@ launcher.Active = true
 launcher.Selectable = false
 launcher.ZIndex = 200
 launcher.Parent = gui
+
+-- Scale the enlarged launcher to the available phone viewport. The desktop button
+-- keeps its full 58px size, while smaller phones get a proportional reduction so
+-- the launcher does not dominate the screen. UIScale also scales the logo and glow.
+local launcherResponsiveScale = Instance.new("UIScale")
+launcherResponsiveScale.Name = "ResponsiveLauncherScale"
+launcherResponsiveScale.Scale = 1
+launcherResponsiveScale.Parent = launcher
+
+local function updateLauncherResponsiveScale()
+    local camera = Workspace.CurrentCamera
+    local viewport = camera and camera.ViewportSize or gui.AbsoluteSize
+    local scale = 1
+
+    if touchInputEnabled or viewport.X < 700 or viewport.Y < 500 then
+        scale = math.clamp(math.min(viewport.X / 430, viewport.Y / 760, 1), 0.72, 1)
+    end
+
+    launcherResponsiveScale.Scale = scale
+end
+
+local launcherViewportConnection
+local function watchLauncherCamera(camera)
+    if launcherViewportConnection then
+        launcherViewportConnection:Disconnect()
+        launcherViewportConnection = nil
+    end
+    if camera then
+        launcherViewportConnection = camera:GetPropertyChangedSignal("ViewportSize"):Connect(updateLauncherResponsiveScale)
+    end
+end
+
+updateLauncherResponsiveScale()
+watchLauncherCamera(Workspace.CurrentCamera)
+Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+    watchLauncherCamera(Workspace.CurrentCamera)
+    task.defer(updateLauncherResponsiveScale)
+end)
+
 launcher.Visible = showLauncherButton
+launcher:SetAttribute("LauncherOpacity", 100)
 addCorner(launcher, 15)
 local launcherStroke = addStroke(launcher, Theme.Stroke, 0.08, 1)
+
+-- The glow belongs behind the launcher logo itself, not around the button perimeter.
+-- Keep it above the button's fill and below the crisp logo artwork.
+launcherGlow.AnchorPoint = Vector2.new(0.5, 0.5)
+launcherGlow.Position = UDim2.fromScale(0.5, 0.5)
+launcherGlow.Size = UDim2.fromOffset(54, 54)
+launcherGlow.ImageTransparency = 0.97
+launcherGlow.ZIndex = 201
+launcherGlow.Parent = launcher
+
+launcherGlowCyan.AnchorPoint = Vector2.new(0.5, 0.5)
+launcherGlowCyan.Position = UDim2.fromScale(0.5, 0.5)
+launcherGlowCyan.Size = UDim2.fromOffset(58, 58)
+launcherGlowCyan.ImageTransparency = 0.91
+launcherGlowCyan.ZIndex = 202
+launcherGlowCyan.Parent = launcher
+
+launcherGlowViolet.AnchorPoint = Vector2.new(0.5, 0.5)
+launcherGlowViolet.Position = UDim2.fromScale(0.5, 0.5)
+launcherGlowViolet.Size = UDim2.fromOffset(56, 56)
+launcherGlowViolet.ImageTransparency = 0.93
+launcherGlowViolet.ZIndex = 203
+launcherGlowViolet.Parent = launcher
 
 -- Keep the launcher deliberately minimal: Syllinse logo and project name only.
 local launcherLogo = Instance.new("ImageLabel")
@@ -1182,18 +1454,17 @@ launcherLogo.Size = UDim2.fromOffset(LAUNCHER_LOGO_SIZE, LAUNCHER_LOGO_SIZE)
 launcherLogo.Image = logoImageSource
 launcherLogo.ImageColor3 = Color3.new(1, 1, 1)
 launcherLogo.ScaleType = Enum.ScaleType.Fit
-launcherLogo.ZIndex = 201
+launcherLogo.ZIndex = 204
 launcherLogo.Parent = launcher
 
 local function syncLauncherGlow()
-    if not launcher or not launcher.Parent or not launcherGlow.Parent then return end
-    local position = launcher.AbsolutePosition
-    local size = launcher.AbsoluteSize
-    local guiPosition = gui.AbsolutePosition
-    launcherGlow.Position = UDim2.fromOffset(
-        position.X - guiPosition.X + size.X / 2,
-        position.Y - guiPosition.Y + size.Y / 2
-    )
+    if not launcher or not launcher.Parent then return end
+    -- Keep the light centered behind the logo itself, not as a halo around the button.
+    -- These are children of the launcher and sit above its background, but below the logo image.
+    local center = UDim2.fromScale(0.5, 0.5)
+    launcherGlow.Position = center
+    launcherGlowCyan.Position = center
+    launcherGlowViolet.Position = center
 end
 launcher:GetPropertyChangedSignal("AbsolutePosition"):Connect(syncLauncherGlow)
 launcher:GetPropertyChangedSignal("AbsoluteSize"):Connect(syncLauncherGlow)
@@ -1201,189 +1472,185 @@ task.defer(syncLauncherGlow)
 
 local windowIsOpen = false
 local windowTransitionId = 0
+-- Keep transition handles and the resting position together to limit top-level locals.
+-- The entire shell is summoned from / recalled into the launcher with no fade or outline flash.
+local windowTransitionTweens = { Scale = nil, Settle = nil, Position = nil, PositionSettle = nil, Rotation = nil, TargetPosition = nil }
 local setWindowOpen
 
 local function refreshLauncherVisibility()
-    local shouldShow = showLauncherButton and not windowIsOpen
+    -- Keep the launcher visible and interactive in both states so it toggles the shell
+    -- open/closed from the same saved position. It may cover only its own small hit area.
+    local shouldShow = showLauncherButton
     launcher.Visible = shouldShow
     launcherGlow.Visible = shouldShow
+    launcherGlowCyan.Visible = shouldShow
+    launcherGlowViolet.Visible = shouldShow
+    launcher.Interactable = shouldShow
+    launcher.Active = shouldShow
     if shouldShow then
         syncLauncherGlow()
     end
 end
 
-local function launcherBounds()
-    local guiPosition = gui.AbsolutePosition
-    local absolutePosition = launcher.AbsolutePosition
-    local size = launcher.AbsoluteSize
-    local center = UDim2.fromOffset(
-        absolutePosition.X - guiPosition.X + size.X / 2,
-        absolutePosition.Y - guiPosition.Y + size.Y / 2
-    )
-    return center, size
+-- Always animate the Syllinse window around the viewport center. The floating launcher
+-- is independently draggable; its position must never determine where the main UI opens.
+local function centeredWindowPosition()
+    local camera = Workspace.CurrentCamera
+    local viewport = camera and camera.ViewportSize
+    if touchInputEnabled and viewport and (viewport.X < 900 or viewport.Y < 500) then
+        return UDim2.new(0.5, 0, 0.5, mobileSafeOffsetY)
+    end
+    return UDim2.fromScale(0.5, 0.5)
 end
 
 setWindowOpen = function(open)
     open = open == true
     if open == windowIsOpen then return end
 
+    -- Cancel any in-flight animation before reversing direction. The launcher is never
+    -- used as a travel destination: the shell opens and closes in place, and the launcher
+    -- stays anchored exactly where the user left it.
+    for _, activeTween in pairs({
+        windowTransitionTweens.Scale,
+        windowTransitionTweens.Settle,
+        windowTransitionTweens.Position,
+        windowTransitionTweens.PositionSettle,
+        windowTransitionTweens.Rotation,
+    }) do
+        if activeTween then
+            pcall(function() activeTween:Cancel() end)
+        end
+    end
+    windowTransitionTweens.Scale = nil
+    windowTransitionTweens.Settle = nil
+    windowTransitionTweens.Position = nil
+    windowTransitionTweens.PositionSettle = nil
+    windowTransitionTweens.Rotation = nil
+
     windowIsOpen = open
     windowTransitionId += 1
     local thisTransition = windowTransitionId
 
+    local targetPosition
+    if windowHasCustomPosition then
+        targetPosition = windowTransitionTweens.TargetPosition or root.Position
+    else
+        targetPosition = centeredWindowPosition()
+    end
+    windowTransitionTweens.TargetPosition = targetPosition
+
+    -- Always keep the shell anchored at its final position. This intentionally removes
+    -- the launcher-to-window travel that made the UI shoot upward and appear to hide.
+    root.Position = targetPosition
+    root.Rotation = 0
+
     if open then
-        -- Keep the responsive fit scale, but remove the resting motion factor during the morph.
-        windowMotionFactor.Value = 1
-        uiScale.Scale = responsiveScaleValue
+        local wasVisible = root.Visible
+        if baseWindowSize then root.Size = baseWindowSize end
 
-        local center
-        local collapsedSize
-
-        if showLauncherButton then
-            local buttonSize
-            center, buttonSize = launcherBounds()
-            local effectiveScale = math.max(uiScale.Scale, 0.01)
-            collapsedSize = UDim2.fromOffset(
-                buttonSize.X / effectiveScale,
-                buttonSize.Y / effectiveScale
-            )
-        else
-            center = UDim2.fromScale(0.5, 0.5)
-            collapsedSize = UDim2.fromOffset(1, 1)
+        if not wasVisible then
+            -- A compact, centered start gives a premium reveal without moving the window.
+            windowMotionFactor.Value = 0.88
         end
 
-        launcher.Visible = false
-        launcherGlow.Visible = false
-        root.Position = center
-        root.Size = collapsedSize
-        root.BackgroundColor3 = CLOSED_SURFACE
+        root.BackgroundColor3 = Theme.Root
         root.BackgroundTransparency = 0
         root.ClipsDescendants = true
-        motionBody.GroupTransparency = showLauncherButton and 1 or 0
-        shellStroke.Transparency = showLauncherButton and 1 or 0.12
         root.Visible = true
+        motionBody.GroupTransparency = 0
+        motionBody.Position = UDim2.fromOffset(0, 0)
+        refreshLauncherVisibility()
 
-        -- The reference animation morphs position + size (not UIScale) with Quart InOut.
-        local grow = TweenService:Create(
-            root,
-            TweenInfo.new(0.85, Enum.EasingStyle.Quart, Enum.EasingDirection.InOut),
-            {
-                Position = center,
-                Size = baseWindowSize,
-                BackgroundColor3 = Theme.Root,
-            }
-        )
-        grow:Play()
+        -- One-piece reveal: the entire opaque shell expands, then gently settles.
+        local openInfo = TweenInfo.new(0.19, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+        local settleInfo = TweenInfo.new(0.075, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
+        windowTransitionTweens.Scale = TweenService:Create(windowMotionFactor, openInfo, {
+            Value = 1.018,
+        })
+        windowTransitionTweens.Scale.Completed:Connect(function(playbackState)
+            if playbackState ~= Enum.PlaybackState.Completed then return end
+            if thisTransition ~= windowTransitionId or not windowIsOpen then return end
 
-        task.delay(0.25, function()
-            if thisTransition ~= windowTransitionId or not windowIsOpen or not root.Parent then
-                return
-            end
-            tween(motionBody, 0.4, { GroupTransparency = 0 })
-            tween(shellStroke, 0.4, { Transparency = 0.12 })
+            windowTransitionTweens.Settle = TweenService:Create(windowMotionFactor, settleInfo, {
+                Value = 1,
+            })
+            windowTransitionTweens.Settle.Completed:Connect(function(settleState)
+                if settleState ~= Enum.PlaybackState.Completed then return end
+                if thisTransition ~= windowTransitionId or not windowIsOpen then return end
+                windowTransitionTweens.Scale = nil
+                windowTransitionTweens.Settle = nil
+            end)
+            windowTransitionTweens.Settle:Play()
         end)
+        windowTransitionTweens.Scale:Play()
     else
-        -- Keep the Lumen overlay alive so its watermark, toasts and external panels continue to work.
+        -- Preserve Lumen overlays so keybind lists, watermarks, and notifications continue working.
         if Lumen and Lumen.OpenPopup and type(Lumen.OpenPopup.Close) == "function" then
             pcall(function() Lumen.OpenPopup.Close() end)
         end
         if Lumen and Lumen._Instance then Lumen._Instance.Enabled = true end
         if Lumen and Lumen._Overlay then Lumen._Overlay.Enabled = true end
 
-        if not showLauncherButton then
-            launcher.Visible = false
-            launcherGlow.Visible = false
-
-            local absoluteCenter = root.AbsolutePosition + root.AbsoluteSize / 2
-            local guiPosition = gui.AbsolutePosition
-            local center = UDim2.fromOffset(
-                absoluteCenter.X - guiPosition.X,
-                absoluteCenter.Y - guiPosition.Y
-            )
-
-            tween(motionBody, 0.12, { GroupTransparency = 1 })
-            tween(shellStroke, 0.12, { Transparency = 1 })
-            local shrinkAway = TweenService:Create(
-                root,
-                TweenInfo.new(0.32, Enum.EasingStyle.Quart, Enum.EasingDirection.In),
-                {
-                    Position = center,
-                    Size = UDim2.fromOffset(1, 1),
-                    BackgroundTransparency = 1,
-                }
-            )
-            shrinkAway:Play()
-            shrinkAway.Completed:Connect(function(playbackState)
-                if playbackState ~= Enum.PlaybackState.Completed then return end
-                if thisTransition ~= windowTransitionId or windowIsOpen then return end
-                root.Visible = false
-                root.Size = baseWindowSize
-                root.BackgroundColor3 = Theme.Root
-                root.BackgroundTransparency = 0
-                shellStroke.Transparency = 0.12
-                motionBody.GroupTransparency = 1
-                windowMotionFactor.Value = 0.90
-                refreshLauncherVisibility()
-            end)
-            return
-        end
-
-        local absoluteCenter = root.AbsolutePosition + root.AbsoluteSize / 2
-        local guiPosition = gui.AbsolutePosition
-        local centerX = absoluteCenter.X - guiPosition.X
-        local centerY = absoluteCenter.Y - guiPosition.Y
-        local center = UDim2.fromOffset(centerX, centerY)
-        local effectiveScale = math.max(uiScale.Scale, 0.01)
-        local buttonSize = launcher.AbsoluteSize
-        local collapsedSize = UDim2.fromOffset(
-            buttonSize.X / effectiveScale,
-            buttonSize.Y / effectiveScale
-        )
-
-        -- Like the reference launcher, the pill follows the main window if it was dragged.
-        launcher.AnchorPoint = Vector2.new(0.5, 0.5)
-        launcher.Position = center
-        tween(motionBody, 0.16, { GroupTransparency = 1 })
-        tween(shellStroke, 0.16, { Transparency = 1 })
-
-        local shrink = TweenService:Create(
-            root,
-            TweenInfo.new(0.82, Enum.EasingStyle.Quart, Enum.EasingDirection.InOut),
-            {
-                Position = center,
-                Size = collapsedSize,
-                BackgroundColor3 = CLOSED_SURFACE,
-            }
-        )
-        shrink:Play()
-        shrink.Completed:Connect(function(playbackState)
+        -- Fast, centered close. No translation, no partial-content fade, and no outline flash.
+        local closeInfo = TweenInfo.new(0.12, Enum.EasingStyle.Quint, Enum.EasingDirection.In)
+        windowTransitionTweens.Scale = TweenService:Create(windowMotionFactor, closeInfo, {
+            Value = 0.88,
+        })
+        windowTransitionTweens.Scale.Completed:Connect(function(playbackState)
             if playbackState ~= Enum.PlaybackState.Completed then return end
             if thisTransition ~= windowTransitionId or windowIsOpen then return end
 
             root.Visible = false
-            root.Size = baseWindowSize
             root.BackgroundColor3 = Theme.Root
             root.BackgroundTransparency = 0
-            shellStroke.Transparency = 0.12
-            motionBody.GroupTransparency = 1
-            windowMotionFactor.Value = 0.90
+            root.Rotation = 0
+            motionBody.GroupTransparency = 0
+            motionBody.Position = UDim2.fromOffset(0, 0)
+            root.Position = targetPosition
+            windowTransitionTweens.TargetPosition = targetPosition
+            windowMotionFactor.Value = 1
+            uiScale.Scale = responsiveScaleValue
+            windowTransitionTweens.Scale = nil
+            windowTransitionTweens.Settle = nil
+            windowTransitionTweens.Position = nil
+            windowTransitionTweens.PositionSettle = nil
+            windowTransitionTweens.Rotation = nil
             refreshLauncherVisibility()
         end)
+        windowTransitionTweens.Scale:Play()
     end
 end
 
 launcher.MouseEnter:Connect(function()
-    tween(launcher, 0.14, { BackgroundColor3 = Theme.SurfaceHover })
-    tween(launcherStroke, 0.14, { Color = Theme.Dim, Transparency = 0 })
-    tween(launcherGlow, 0.16, { ImageTransparency = 0.66, Size = UDim2.fromOffset(LAUNCHER_SIZE.X + 54, 98) })
+    local opacity = math.clamp(tonumber(launcher:GetAttribute("LauncherOpacity")) or 100, 0, 100) / 100
+    tween(launcher, 0.14, {
+        BackgroundColor3 = Theme.SurfaceHover,
+        BackgroundTransparency = 1 - opacity,
+    })
+    tween(launcherStroke, 0.14, { Color = Theme.Dim, Transparency = 1 - opacity })
+    tween(launcherGlow, 0.16, {
+        ImageTransparency = 1 - (0.05 * opacity),
+        Size = UDim2.fromOffset(56, 56),
+    })
+    tween(launcherGlowCyan, 0.16, { ImageTransparency = 1 - (0.13 * opacity), Size = UDim2.fromOffset(60, 60) })
+    tween(launcherGlowViolet, 0.16, { ImageTransparency = 1 - (0.10 * opacity), Size = UDim2.fromOffset(58, 58) })
 end)
 launcher.MouseLeave:Connect(function()
-    tween(launcher, 0.18, { BackgroundColor3 = CLOSED_SURFACE })
-    tween(launcherStroke, 0.18, { Color = Theme.Stroke, Transparency = 0.08 })
-    tween(launcherGlow, 0.22, { ImageTransparency = 0.82, Size = UDim2.fromOffset(LAUNCHER_SIZE.X + 40, 90) })
+    local opacity = math.clamp(tonumber(launcher:GetAttribute("LauncherOpacity")) or 100, 0, 100) / 100
+    tween(launcher, 0.18, {
+        BackgroundColor3 = CLOSED_SURFACE,
+        BackgroundTransparency = 1 - opacity,
+    })
+    tween(launcherStroke, 0.18, { Color = Theme.Stroke, Transparency = 1 - (0.92 * opacity) })
+    tween(launcherGlow, 0.22, {
+        ImageTransparency = 1 - (0.03 * opacity),
+        Size = UDim2.fromOffset(54, 54),
+    })
+    tween(launcherGlowCyan, 0.22, { ImageTransparency = 1 - (0.09 * opacity), Size = UDim2.fromOffset(58, 58) })
+    tween(launcherGlowViolet, 0.22, { ImageTransparency = 1 - (0.07 * opacity), Size = UDim2.fromOffset(56, 56) })
 end)
 
--- The launcher is draggable like the reference pill; a click opens it, a drag only repositions it.
+-- The launcher is draggable like the reference pill; a tap toggles open/closed, while a drag only repositions it.
 local draggingLauncher = false
 local launcherMoved = false
 local launcherGrab = Vector2.zero
@@ -1427,26 +1694,21 @@ UserInputService.InputEnded:Connect(function(input)
 
     draggingLauncher = false
     if not launcherMoved then
-        setWindowOpen(true)
+        setWindowOpen(not windowIsOpen)
     end
 end)
 
-closeButton.MouseEnter:Connect(function()
-    tween(closeButton, 0.14, {
-        BackgroundTransparency = 0.08,
-        TextColor3 = Theme.Text,
-    })
-    tween(closeStroke, 0.14, { Transparency = 0.2 })
+-- Keep the enlarged 48x48 drag hit area fully invisible.
+-- Only the four-way glyph changes tint on hover; no tile, background, or outline appears.
+dragButton.MouseEnter:Connect(function()
+    for _, stroke in ipairs(dragGlyphStrokes) do
+        tween(stroke, 0.14, { BackgroundColor3 = Theme.Text })
+    end
 end)
-closeButton.MouseLeave:Connect(function()
-    tween(closeButton, 0.18, {
-        BackgroundTransparency = 1,
-        TextColor3 = Theme.Muted,
-    })
-    tween(closeStroke, 0.18, { Transparency = 1 })
-end)
-closeButton.Activated:Connect(function()
-    setWindowOpen(false)
+dragButton.MouseLeave:Connect(function()
+    for _, stroke in ipairs(dragGlyphStrokes) do
+        tween(stroke, 0.18, { BackgroundColor3 = Theme.Muted })
+    end
 end)
 
 -- Search has no dropdown. After Lumen columns are mounted below, typed prefixes navigate
@@ -1497,46 +1759,94 @@ local footerBrand = makeText(
 footerBrand.AnchorPoint = Vector2.new(1, 0)
 footerBrand.ZIndex = 103
 
--- Drag window from the left side of the top bar.
+-- Drag the shell only from the dedicated four-way icon.
+-- Keep the entire shell inside the top/bottom and right edges, while allowing it to
+-- move partly beyond the left edge as long as the top-right drag icon stays reachable.
 local dragging = false
 local dragInput
 local dragStart
 local startPosition
 
-dragHandle.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        dragging = true
-        dragStart = input.Position
-        startPosition = root.Position
-        input.Changed:Connect(function()
-            if input.UserInputState == Enum.UserInputState.End then
-                dragging = false
-            end
-        end)
+local function beginShellDrag(input)
+    if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then
+        return
     end
-end)
+    dragging = true
+    -- Store the active pointer mode in dragInput. Mouse drags follow global mouse-move
+    -- events; touch drags follow only the touch that began on the drag handle.
+    dragInput = input.UserInputType == Enum.UserInputType.Touch and input or Enum.UserInputType.MouseButton1
+    dragStart = input.Position
+    startPosition = root.Position
+    input.Changed:Connect(function()
+        if input.UserInputState == Enum.UserInputState.End then
+            dragging = false
+            dragInput = nil
+        end
+    end)
+end
 
-dragHandle.InputChanged:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
-        dragInput = input
-    end
-end)
+-- Only the dedicated four-way drag icon can move the Syllinse shell.
+dragButton.InputBegan:Connect(beginShellDrag)
 
 UserInputService.InputChanged:Connect(function(input)
-    if dragging and input == dragInput then
-        local delta = input.Position - dragStart
+    local pointerMoved = dragging and (
+        (dragInput == Enum.UserInputType.MouseButton1 and input.UserInputType == Enum.UserInputType.MouseMovement)
+        or (dragInput ~= Enum.UserInputType.MouseButton1 and dragInput == input and input.UserInputType == Enum.UserInputType.Touch)
+    )
+    if pointerMoved then
+        local pointerDelta = input.Position - dragStart
+        if pointerDelta.Magnitude > 3 then
+            windowHasCustomPosition = true
+        end
+
+        local camera = Workspace.CurrentCamera
+        local viewport = camera and camera.ViewportSize or gui.AbsoluteSize
+        local shellSize = root.AbsoluteSize
+        local dragSize = dragButton.AbsoluteSize
+        local centerX = viewport.X * startPosition.X.Scale + startPosition.X.Offset + pointerDelta.X
+        local centerY = viewport.Y * startPosition.Y.Scale + startPosition.Y.Offset + pointerDelta.Y
+
+        -- The left edge can leave the screen, but the drag icon itself must remain visible.
+        local minCenterX = 8 - shellSize.X / 2 + 6 + dragSize.X
+        -- Keep the right edge of the shell on-screen so it cannot hide the drag icon.
+        local maxCenterX = viewport.X - shellSize.X / 2 - 8
+        if minCenterX > maxCenterX then
+            maxCenterX = viewport.X - shellSize.X / 2 + 2
+            minCenterX = math.min(minCenterX, maxCenterX)
+        end
+        centerX = math.clamp(centerX, minCenterX, maxCenterX)
+
+        -- Top matches the right side: keep the complete shell inside the top margin.
+        -- Bottom remains flexible, but the top-right drag handle must stay reachable.
+        local dragOffsetY = dragButton.AbsolutePosition.Y - root.AbsolutePosition.Y
+        local minCenterY = 8 + shellSize.Y / 2
+        local maxCenterY = viewport.Y - 8 - dragOffsetY - dragSize.Y + shellSize.Y / 2
+        if maxCenterY < minCenterY then
+            centerY = minCenterY
+        else
+            centerY = math.clamp(centerY, minCenterY, maxCenterY)
+        end
+
         root.Position = UDim2.new(
             startPosition.X.Scale,
-            startPosition.X.Offset + delta.X,
+            centerX - viewport.X * startPosition.X.Scale,
             startPosition.Y.Scale,
-            startPosition.Y.Offset + delta.Y
+            centerY - viewport.Y * startPosition.Y.Scale
         )
+        windowTransitionTweens.TargetPosition = root.Position
+
+        -- Rebase after each update. This prevents edge-clamping from feeling sticky:
+        -- when the pointer reverses direction, the shell moves immediately.
+        dragStart = input.Position
+        startPosition = root.Position
     end
 end)
 
 UserInputService.InputEnded:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+    if (dragInput == Enum.UserInputType.MouseButton1 and input.UserInputType == Enum.UserInputType.MouseButton1)
+        or (dragInput ~= Enum.UserInputType.MouseButton1 and input == dragInput and input.UserInputType == Enum.UserInputType.Touch) then
         dragging = false
+        dragInput = nil
     end
 end)
 
@@ -1703,9 +2013,9 @@ local loadOk, LumenOrError = pcall(function()
     librarySource, didPatch = replaceLibraryText(
         librarySource,
         [[local Button = Add("TextButton", { Parent = self.LeftContent; Name = "Toggle"; AutoButtonColor = false; BackgroundColor3 = RGB(20, 20, 21);]],
-        [[local Button = Add("TextButton", { Parent = self.LeftContent; Name = "Toggle"; AutoButtonColor = false; BackgroundColor3 = RGB(64, 62, 62);]]
+        [[local Button = Add("TextButton", { Parent = self.LeftContent; Name = "Toggle"; AutoButtonColor = false; BackgroundColor3 = RGB(78, 76, 76);]]
     )
-    if not didPatch then warn("[Syllinse] Could not set inactive Lumen toggle tracks to visible charcoal gray") end
+    if not didPatch then warn("[Syllinse] Could not set initial Lumen toggle tracks to visible charcoal gray") end
 
     -- Use Lumen's native action-button dimensions, hover and click behavior.
 
@@ -1728,6 +2038,16 @@ local loadOk, LumenOrError = pcall(function()
         'Image = ResolveIcon(Section.Icon);\n\t\t\tImageColor3 = Library.Theme.TextDim;\n\t\t\tPosition = UFS(0, 0.5);'
     )
     if not didPatch then warn("[Syllinse] Could not tint Lumen section icons") end
+
+
+    -- Use consistent text-only headers for all Lumen section cards. Hiding the image at
+    -- zero size and removing layout padding means titles line up with the header's left inset.
+    librarySource, didPatch = replaceLibraryText(
+        librarySource,
+        'Add("ImageLabel", {\n\t\t\tParent = Header;\n\t\t\tName = "Icon";\n\t\t\tBackgroundColor3 = RGB(255, 255, 255);\n\t\t\tBackgroundTransparency = 1;\n\t\t\tBorderColor3 = RGB(0, 0, 0);\n\t\t\tBorderSizePixel = 0;\n\t\t\tImage = ResolveIcon(Section.Icon);\n\t\t\tImageColor3 = Library.Theme.TextDim;\n\t\t\tPosition = UFS(0, 0.5);\n\t\t\tSize = UFO(16, 16);\n\t\t})\n\t\tAdd("UIListLayout", {\n\t\t\tParent = Header;\n\t\t\tFillDirection = FD.Horizontal;\n\t\t\tPadding = UD(0, 5);\n\t\t\tSortOrder = SO.LayoutOrder;\n\t\t\tVerticalAlignment = VFA.Center;\n\t\t})',
+        'Add("ImageLabel", {\n\t\t\tParent = Header;\n\t\t\tName = "Icon";\n\t\t\tBackgroundTransparency = 1;\n\t\t\tBorderSizePixel = 0;\n\t\t\tImage = "";\n\t\t\tPosition = UFS(0, 0.5);\n\t\t\tSize = UFO(0, 0);\n\t\t\tVisible = false;\n\t\t})\n\t\tAdd("UIListLayout", {\n\t\t\tParent = Header;\n\t\t\tFillDirection = FD.Horizontal;\n\t\t\tPadding = UD(0, 0);\n\t\t\tSortOrder = SO.LayoutOrder;\n\t\t\tVerticalAlignment = VFA.Center;\n\t\t})'
+    )
+    if not didPatch then warn("[Syllinse] Could not remove Lumen section header icons in this library version") end
     librarySource = string.gsub(librarySource,
         'Image = "rbxassetid://95865107607162"; ImageTransparency = 0.2;',
         'Image = "rbxassetid://95865107607162"; ImageColor3 = Library.Theme.TextDim; ImageTransparency = 0.2;')
@@ -1745,15 +2065,34 @@ local loadOk, LumenOrError = pcall(function()
     librarySource, didPatch = replaceLibraryText(
         librarySource,
         'local Circle = Add("Frame", { Parent = Button; Name = "Circle"; AnchorPoint = V2(1, 0.5); BackgroundColor3 = RGB(112, 110, 110); BorderColor3 = RGB(0, 0, 0); BorderSizePixel = 0; Position = UD2(1, -3, 0.5, 0); Size = UFO(8, 8); }) :: Frame',
-        'local Circle = Add("Frame", { Parent = Button; Name = "Circle"; AnchorPoint = V2(0.5, 0.5); BackgroundColor3 = RGB(220, 218, 218); BorderColor3 = RGB(0, 0, 0); BorderSizePixel = 0; Position = UD2(1, 0, 0.5, 0); Size = UFO(16, 16); }) :: Frame'
+        'local Circle = Add("Frame", { Parent = Button; Name = "Circle"; AnchorPoint = V2(0.5, 0.5); BackgroundColor3 = RGB(220, 218, 218); BorderColor3 = RGB(0, 0, 0); BorderSizePixel = 0; Position = UD2(0, 8, 0.5, 0); Size = UFO(16, 16); }) :: Frame'
     )
     if not didPatch then warn("[Syllinse] Could not enlarge and center Lumen slider handles") end
     librarySource, didPatch = replaceLibraryText(
         librarySource,
         'Tween(Circle, { Position = UD2(Alpha, -3, 0.5, 0); BackgroundTransparency = Fade }, 0.08)',
-        'Tween(Circle, { Position = UD2(Alpha, 0, 0.5, 0); BackgroundTransparency = 0 }, 0.08)'
+        'Tween(Circle, { Position = UD2(Alpha, 8 - 16 * Alpha, 0.5, 0); BackgroundTransparency = 0 }, 0.08)'
     )
     if not didPatch then warn("[Syllinse] Could not align Lumen slider handles with the active fill") end
+
+    -- Stop the filled rail at the thumb's center. The old full-width Alpha sizing let
+    -- the rounded right UICorner stick out from behind the thumb, most noticeably at 100%.
+    -- Matching the fill endpoint to the thumb center keeps the rounded cap hidden underneath it.
+    librarySource, didPatch = replaceLibraryText(
+        librarySource,
+        'Tween(Overlay, { Size = UD2(Alpha, 0, 1, 0); BackgroundTransparency = Fade }, 0.08)',
+        'Tween(Overlay, { Size = UD2(Alpha, 8 - 16 * Alpha, 1, 0); BackgroundTransparency = Fade }, 0.08)'
+    )
+    if not didPatch then warn("[Syllinse] Could not align the slider fill endpoint under its thumb") end
+
+    -- Keep the slider thumb fully on the rail at both endpoints, and map clicks through
+    -- the usable center-to-center travel so the rightmost thumb is still easy to grab.
+    librarySource, didPatch = replaceLibraryText(
+        librarySource,
+        'BindSlider(Button, function(Alpha)\n\t\tSlider.Set(Slider.Min + (Slider.Max - Slider.Min) * Alpha.X)\n\tend)',
+        'BindSlider(Button, function(Alpha)\n\t\tlocal Width = Button.AbsoluteSize.X\n\t\tlocal Inset = math.min(8, Width * 0.5)\n\t\tlocal UsableWidth = math.max(Width - Inset * 2, 1)\n\t\tlocal AdjustedAlpha = MC((Alpha.X * Width - Inset) / UsableWidth, 0, 1)\n\t\tSlider.Set(Slider.Min + (Slider.Max - Slider.Min) * AdjustedAlpha)\n\tend)'
+    )
+    if not didPatch then warn("[Syllinse] Could not apply Lumen slider endpoint hitbox fix") end
 
     librarySource, didPatch = replaceLibraryText(
         librarySource,
@@ -1927,32 +2266,31 @@ if Lumen._Overlay then
 end
 LumenWindow.Canvas.Visible = false
 
--- Mobile dropdown fit: Lumen's options popup lives on a separate ScreenGui instead of
--- inheriting the Syllinse window's ResponsiveScale. On touch-only devices, give popup
--- roots their own UIScale and keep it matched to the window's viewport-fit scale.
--- This only affects the open dropdown menu, not the closed dropdown field or desktop UI.
-local mobileDropdownPopupNames = {
+-- Lumen's option popups live on a separate ScreenGui instead of inheriting the
+-- Syllinse window's ResponsiveScale. Give popup roots their own UIScale so menus stay
+-- visually matched to the window on both desktop and mobile.
+local dropdownPopupNames = {
     Options = true,
     DropdownPopup = true,
     DropdownList = true,
     DropdownOptions = true,
 }
 
-local function syncMobileDropdownPopup(instance)
-    if not showLauncherButton or not instance or not instance:IsA("GuiObject") then
+local function syncDropdownPopupScale(instance)
+    if not instance or not instance:IsA("GuiObject") then
         return
     end
-    if not mobileDropdownPopupNames[instance.Name] then
+    if not dropdownPopupNames[instance.Name] then
         return
     end
     if instance.Parent ~= Lumen._Instance and instance.Parent ~= Lumen._Overlay then
         return
     end
 
-    local popupScale = instance:FindFirstChild("SyllinseMobileDropdownScale")
+    local popupScale = instance:FindFirstChild("SyllinseDropdownScale")
     if not popupScale then
         popupScale = Instance.new("UIScale")
-        popupScale.Name = "SyllinseMobileDropdownScale"
+        popupScale.Name = "SyllinseDropdownScale"
         popupScale.Parent = instance
     end
     popupScale.Scale = math.clamp(responsiveScaleValue, 0.35, 1)
@@ -1961,12 +2299,12 @@ end
 local function watchMobileDropdownPopups(screenLayer)
     if not screenLayer then return end
     for _, child in ipairs(screenLayer:GetChildren()) do
-        syncMobileDropdownPopup(child)
+        syncDropdownPopupScale(child)
     end
     screenLayer.ChildAdded:Connect(function(child)
         task.defer(function()
             if child and child.Parent == screenLayer then
-                syncMobileDropdownPopup(child)
+                syncDropdownPopupScale(child)
             end
         end)
     end)
@@ -1977,11 +2315,10 @@ watchMobileDropdownPopups(Lumen._Overlay)
 
 if Workspace.CurrentCamera then
     Workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
-        if not showLauncherButton then return end
         for _, layer in ipairs({ Lumen._Instance, Lumen._Overlay }) do
             if layer then
                 for _, child in ipairs(layer:GetChildren()) do
-                    syncMobileDropdownPopup(child)
+                    syncDropdownPopupScale(child)
                 end
             end
         end
@@ -2004,7 +2341,8 @@ Lumen.LoadConfigData = function(data)
     return result
 end
 
-local featureSettings = {
+local SyllinseRuntime = {}
+SyllinseRuntime.featureSettings = {
     -- Combat
     AimbotEnabled = false,
     AimbotKey = Enum.KeyCode.RightShift,
@@ -2052,6 +2390,7 @@ local featureSettings = {
     JumpPower = 50,
     -- Settings
     ShowLauncherButton = showLauncherButton,
+    LauncherOpacity = 100,
     ShowMenuFunctionTerminology = false,
     Notifications = true,
     ShowUserInfo = true,
@@ -2061,25 +2400,43 @@ local featureSettings = {
     MobileActionButtons = false,
 }
 
+-- 0% makes the launcher visuals fully transparent; its hit area remains active so
+-- the user can still tap/drag the open-close button while recording on mobile.
+-- 100% restores the original appearance. Use a table method to avoid another
+-- top-level local register in this already-large script.
+SyllinseRuntime.featureSettings.ApplyLauncherOpacity = function(value)
+    local opacity = math.clamp(tonumber(value) or 100, 0, 100) / 100
+    SyllinseRuntime.featureSettings.LauncherOpacity = math.floor(opacity * 100 + 0.5)
+    launcher:SetAttribute("LauncherOpacity", SyllinseRuntime.featureSettings.LauncherOpacity)
+
+    launcher.BackgroundTransparency = 1 - opacity
+    launcherStroke.Transparency = 1 - (0.92 * opacity)
+    launcherLogo.ImageTransparency = 1 - opacity
+    launcherGlow.ImageTransparency = 1 - (0.03 * opacity)
+    launcherGlowCyan.ImageTransparency = 1 - (0.09 * opacity)
+    launcherGlowViolet.ImageTransparency = 1 - (0.07 * opacity)
+end
+SyllinseRuntime.featureSettings.ApplyLauncherOpacity(100)
+
 -- Magik Society-style toast notifications, rebuilt with the current Syllinse palette.
 -- The layout keeps the source UI's soft shadow, thin top highlight, optional icon,
 -- close button, slide animation and duration progress bar without its purple accent.
-local notificationHost
-local notificationLayout
-local notificationPosition = "Top Right"
-local notificationOrder = 0
-local activeNotificationDismissals = {}
-local MAX_SYLLINSE_NOTIFICATIONS = 4
-local NOTIFICATION_SHADOW_ASSET = "rbxassetid://6014261993"
-local NOTIFICATION_GLOW_ASSET = "rbxassetid://8992230677"
-local NOTIFICATION_TITLE_COLORS = {
+SyllinseRuntime.notificationHost = nil
+SyllinseRuntime.notificationLayout = nil
+SyllinseRuntime.notificationPosition = "Top Right"
+SyllinseRuntime.notificationOrder = 0
+SyllinseRuntime.activeNotificationDismissals = {}
+SyllinseRuntime.MAX_SYLLINSE_NOTIFICATIONS = 4
+SyllinseRuntime.NOTIFICATION_SHADOW_ASSET = "rbxassetid://6014261993"
+SyllinseRuntime.NOTIFICATION_GLOW_ASSET = "rbxassetid://8992230677"
+SyllinseRuntime.NOTIFICATION_TITLE_COLORS = {
     Success = Theme.Text,
     Info = Theme.PanelTitle,
     Warning = Theme.PanelText,
     Error = Theme.Text,
 }
 
-local function getNotificationWidth()
+SyllinseRuntime.getNotificationWidth = function()
     if showLauncherButton then
         local camera = Workspace.CurrentCamera
         local viewportWidth = camera and camera.ViewportSize.X or 390
@@ -2089,70 +2446,70 @@ local function getNotificationWidth()
     return 248
 end
 
-local function getNotificationInset()
+SyllinseRuntime.getNotificationInset = function()
     return showLauncherButton and 10 or 16
 end
 
-local function getNotificationHost()
-    if notificationHost and notificationHost.Parent then
-        return notificationHost
+SyllinseRuntime.getNotificationHost = function()
+    if SyllinseRuntime.notificationHost and SyllinseRuntime.notificationHost.Parent then
+        return SyllinseRuntime.notificationHost
     end
 
     local parent = (Lumen and Lumen._Instance and Lumen._Instance:IsA("ScreenGui")) and Lumen._Instance or gui
-    local inset = getNotificationInset()
-    notificationHost = Instance.new("Frame")
-    notificationHost.Name = "SyllinseNotifications"
-    notificationHost.AnchorPoint = Vector2.new(1, 0)
-    notificationHost.Position = UDim2.new(1, -inset, 0, inset)
-    notificationHost.Size = UDim2.new(0, getNotificationWidth(), 1, -(inset * 2))
-    notificationHost.BackgroundTransparency = 1
-    notificationHost.BorderSizePixel = 0
-    notificationHost.ZIndex = 80
-    notificationHost.Parent = parent
+    local inset = SyllinseRuntime.getNotificationInset()
+    SyllinseRuntime.notificationHost = Instance.new("Frame")
+    SyllinseRuntime.notificationHost.Name = "SyllinseNotifications"
+    SyllinseRuntime.notificationHost.AnchorPoint = Vector2.new(1, 0)
+    SyllinseRuntime.notificationHost.Position = UDim2.new(1, -inset, 0, inset)
+    SyllinseRuntime.notificationHost.Size = UDim2.new(0, SyllinseRuntime.getNotificationWidth(), 1, -(inset * 2))
+    SyllinseRuntime.notificationHost.BackgroundTransparency = 1
+    SyllinseRuntime.notificationHost.BorderSizePixel = 0
+    SyllinseRuntime.notificationHost.ZIndex = 80
+    SyllinseRuntime.notificationHost.Parent = parent
 
-    notificationLayout = Instance.new("UIListLayout")
-    notificationLayout.Name = "ToastLayout"
-    notificationLayout.SortOrder = Enum.SortOrder.LayoutOrder
-    notificationLayout.VerticalAlignment = Enum.VerticalAlignment.Top
-    notificationLayout.HorizontalAlignment = Enum.HorizontalAlignment.Right
-    notificationLayout.Padding = UDim.new(0, 6)
-    notificationLayout.Parent = notificationHost
+    SyllinseRuntime.notificationLayout = Instance.new("UIListLayout")
+    SyllinseRuntime.notificationLayout.Name = "ToastLayout"
+    SyllinseRuntime.notificationLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    SyllinseRuntime.notificationLayout.VerticalAlignment = Enum.VerticalAlignment.Top
+    SyllinseRuntime.notificationLayout.HorizontalAlignment = Enum.HorizontalAlignment.Right
+    SyllinseRuntime.notificationLayout.Padding = UDim.new(0, 6)
+    SyllinseRuntime.notificationLayout.Parent = SyllinseRuntime.notificationHost
 
-    return notificationHost
+    return SyllinseRuntime.notificationHost
 end
 
-local function setNotificationPosition(position)
+SyllinseRuntime.setNotificationPosition = function(position)
     if type(position) ~= "string" then return false end
     if not table.find({ "Top Left", "Top Right", "Bottom Left", "Bottom Right" }, position) then
         return false
     end
 
-    notificationPosition = position
-    local host = getNotificationHost()
+    SyllinseRuntime.notificationPosition = position
+    local host = SyllinseRuntime.getNotificationHost()
     local left = position == "Top Left" or position == "Bottom Left"
     local bottom = position == "Bottom Left" or position == "Bottom Right"
-    local inset = getNotificationInset()
-    host.Size = UDim2.new(0, getNotificationWidth(), 1, -(inset * 2))
+    local inset = SyllinseRuntime.getNotificationInset()
+    host.Size = UDim2.new(0, SyllinseRuntime.getNotificationWidth(), 1, -(inset * 2))
     host.AnchorPoint = Vector2.new(left and 0 or 1, bottom and 1 or 0)
     host.Position = UDim2.new(left and 0 or 1, left and inset or -inset, bottom and 1 or 0, bottom and -inset or inset)
-    if notificationLayout then
-        notificationLayout.HorizontalAlignment = left and Enum.HorizontalAlignment.Left or Enum.HorizontalAlignment.Right
-        notificationLayout.VerticalAlignment = bottom and Enum.VerticalAlignment.Bottom or Enum.VerticalAlignment.Top
+    if SyllinseRuntime.notificationLayout then
+        SyllinseRuntime.notificationLayout.HorizontalAlignment = left and Enum.HorizontalAlignment.Left or Enum.HorizontalAlignment.Right
+        SyllinseRuntime.notificationLayout.VerticalAlignment = bottom and Enum.VerticalAlignment.Bottom or Enum.VerticalAlignment.Top
     end
     return true
 end
 
-local function syncNotificationHostToViewport()
-    if not notificationHost or not notificationHost.Parent then return end
-    local inset = getNotificationInset()
-    local left = notificationPosition == "Top Left" or notificationPosition == "Bottom Left"
-    local bottom = notificationPosition == "Bottom Left" or notificationPosition == "Bottom Right"
-    notificationHost.Size = UDim2.new(0, getNotificationWidth(), 1, -(inset * 2))
-    notificationHost.AnchorPoint = Vector2.new(left and 0 or 1, bottom and 1 or 0)
-    notificationHost.Position = UDim2.new(left and 0 or 1, left and inset or -inset, bottom and 1 or 0, bottom and -inset or inset)
+SyllinseRuntime.syncNotificationHostToViewport = function()
+    if not SyllinseRuntime.notificationHost or not SyllinseRuntime.notificationHost.Parent then return end
+    local inset = SyllinseRuntime.getNotificationInset()
+    local left = SyllinseRuntime.notificationPosition == "Top Left" or SyllinseRuntime.notificationPosition == "Bottom Left"
+    local bottom = SyllinseRuntime.notificationPosition == "Bottom Left" or SyllinseRuntime.notificationPosition == "Bottom Right"
+    SyllinseRuntime.notificationHost.Size = UDim2.new(0, SyllinseRuntime.getNotificationWidth(), 1, -(inset * 2))
+    SyllinseRuntime.notificationHost.AnchorPoint = Vector2.new(left and 0 or 1, bottom and 1 or 0)
+    SyllinseRuntime.notificationHost.Position = UDim2.new(left and 0 or 1, left and inset or -inset, bottom and 1 or 0, bottom and -inset or inset)
 end
 
-local function makeToastGlow(parent)
+SyllinseRuntime.makeToastGlow = function(parent)
     local bloom = Instance.new("ImageLabel")
     bloom.Name = "ToastGlow"
     bloom.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -2160,7 +2517,7 @@ local function makeToastGlow(parent)
     bloom.Size = UDim2.fromOffset(showLauncherButton and 145 or 180, showLauncherButton and 62 or 76)
     bloom.BackgroundTransparency = 1
     bloom.BorderSizePixel = 0
-    bloom.Image = NOTIFICATION_GLOW_ASSET
+    bloom.Image = SyllinseRuntime.NOTIFICATION_GLOW_ASSET
     bloom.ImageColor3 = Color3.new(1, 1, 1)
     bloom.ImageTransparency = 0.94
     bloom.ZIndex = 82
@@ -2176,17 +2533,17 @@ local function makeToastGlow(parent)
     return bloom
 end
 
-local function showNotification(options)
+SyllinseRuntime.showNotification = function(options)
     options = type(options) == "table" and options or {}
     local duration = math.clamp(tonumber(options.Duration) or 3.5, 0.5, 20)
     local title = tostring(options.Title or "Notification")
     local bodyText = tostring(options.Content or options.Text or options.Message or "")
-    local titleColor = NOTIFICATION_TITLE_COLORS[options.Type] or Theme.PanelTitle
+    local titleColor = SyllinseRuntime.NOTIFICATION_TITLE_COLORS[options.Type] or Theme.PanelTitle
 
-    notificationOrder += 1
-    local host = getNotificationHost()
-    local fromLeft = notificationPosition == "Top Left" or notificationPosition == "Bottom Left"
-    local slideDistance = host.AbsoluteSize.X > 0 and (host.AbsoluteSize.X + 18) or (getNotificationWidth() + 18)
+    SyllinseRuntime.notificationOrder += 1
+    local host = SyllinseRuntime.getNotificationHost()
+    local fromLeft = SyllinseRuntime.notificationPosition == "Top Left" or SyllinseRuntime.notificationPosition == "Bottom Left"
+    local slideDistance = host.AbsoluteSize.X > 0 and (host.AbsoluteSize.X + 18) or (SyllinseRuntime.getNotificationWidth() + 18)
     local enterX = fromLeft and -slideDistance or slideDistance
 
     local outer = Instance.new("Frame")
@@ -2195,7 +2552,7 @@ local function showNotification(options)
     outer.AutomaticSize = Enum.AutomaticSize.Y
     outer.BackgroundTransparency = 1
     outer.BorderSizePixel = 0
-    outer.LayoutOrder = notificationOrder
+    outer.LayoutOrder = SyllinseRuntime.notificationOrder
     outer.ZIndex = 80
     outer.Parent = host
 
@@ -2215,7 +2572,7 @@ local function showNotification(options)
     shadow.Size = UDim2.new(1, 28, 1, 28)
     shadow.BackgroundTransparency = 1
     shadow.BorderSizePixel = 0
-    shadow.Image = NOTIFICATION_SHADOW_ASSET
+    shadow.Image = SyllinseRuntime.NOTIFICATION_SHADOW_ASSET
     shadow.ImageColor3 = Color3.new(0, 0, 0)
     shadow.ImageTransparency = 1
     shadow.ScaleType = Enum.ScaleType.Slice
@@ -2248,7 +2605,7 @@ local function showNotification(options)
     edge.ZIndex = 83
     edge.Parent = toast
 
-    makeToastGlow(toast)
+    SyllinseRuntime.makeToastGlow(toast)
 
     local inner = Instance.new("Frame")
     inner.Name = "ToastContent"
@@ -2354,9 +2711,9 @@ local function showNotification(options)
     dismiss = function()
         if dismissed then return end
         dismissed = true
-        for i, entry in ipairs(activeNotificationDismissals) do
+        for i, entry in ipairs(SyllinseRuntime.activeNotificationDismissals) do
             if entry == dismiss then
-                table.remove(activeNotificationDismissals, i)
+                table.remove(SyllinseRuntime.activeNotificationDismissals, i)
                 break
             end
         end
@@ -2369,9 +2726,9 @@ local function showNotification(options)
     end
 
     closeButton.Activated:Connect(dismiss)
-    table.insert(activeNotificationDismissals, dismiss)
-    while #activeNotificationDismissals > MAX_SYLLINSE_NOTIFICATIONS do
-        local oldest = table.remove(activeNotificationDismissals, 1)
+    table.insert(SyllinseRuntime.activeNotificationDismissals, dismiss)
+    while #SyllinseRuntime.activeNotificationDismissals > SyllinseRuntime.MAX_SYLLINSE_NOTIFICATIONS do
+        local oldest = table.remove(SyllinseRuntime.activeNotificationDismissals, 1)
         if oldest then oldest() end
     end
 
@@ -2390,24 +2747,24 @@ local function showNotification(options)
     return { Dismiss = dismiss }
 end
 
-Lumen.Notify = showNotification
+Lumen.Notify = SyllinseRuntime.showNotification
 Lumen.NotifyToggles = false
 
 if Workspace.CurrentCamera then
-    Workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(syncNotificationHostToViewport)
+    Workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(SyllinseRuntime.syncNotificationHostToViewport)
 end
 Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
     local camera = Workspace.CurrentCamera
     if camera then
-        camera:GetPropertyChangedSignal("ViewportSize"):Connect(syncNotificationHostToViewport)
+        camera:GetPropertyChangedSignal("ViewportSize"):Connect(SyllinseRuntime.syncNotificationHostToViewport)
     end
-    syncNotificationHostToViewport()
+    SyllinseRuntime.syncNotificationHostToViewport()
 end)
 
-local function notify(title, message, kind, duration)
-    if featureSettings.Notifications == false then return end
+SyllinseRuntime.notify = function(title, message, kind, duration)
+    if SyllinseRuntime.featureSettings.Notifications == false then return end
     local ok, err = pcall(function()
-        showNotification({
+        SyllinseRuntime.showNotification({
             Title = tostring(title or "Syllinse"),
             Content = tostring(message or ""),
             Type = kind or "Info",
@@ -2419,11 +2776,11 @@ end
 
 -- Per-feature notification opt-ins. The Settings-page Notifications switch is the
 -- global master; these individual bells decide which feature toggles may toast.
-local featureNotificationSettings = {}
-featureSettings.FeatureNotifications = featureNotificationSettings
+SyllinseRuntime.featureNotificationSettings = {}
+SyllinseRuntime.featureSettings.FeatureNotifications = SyllinseRuntime.featureNotificationSettings
 -- Only controls that also expose a keybind/settings gear get an inline bell.
 -- Visual-only toggles and settings without a keybind control intentionally have no bell.
-local FEATURE_NOTIFICATION_FLAGS = {
+SyllinseRuntime.FEATURE_NOTIFICATION_FLAGS = {
     AimbotEnabled = true,
     SilentAim = true,
     TriggerEnabled = true,
@@ -2431,7 +2788,36 @@ local FEATURE_NOTIFICATION_FLAGS = {
     Fly = true,
 }
 
-local function attachFeatureNotificationBell(label, toggleControl, featureFlag)
+-- Lumen's compact label rows are 14 px tall by default. When a touch control grows,
+-- expand its owning row as well so larger controls never collide with the next row.
+Lumen._SyllinseExpandMobileControlRow = function(control, targetHeight)
+    if not (touchInputEnabled and not UserInputService.KeyboardEnabled) or not control then return end
+    local ancestor = control.Parent
+    while ancestor and ancestor ~= root do
+        if ancestor.Name == "LabelFrame" then
+            local size = ancestor.Size
+            if size.Y.Scale == 0 and size.Y.Offset < targetHeight then
+                ancestor.Size = UDim2.new(size.X.Scale, size.X.Offset, 0, targetHeight)
+            end
+            ancestor.ClipsDescendants = false
+            -- Keep both halves centered in the taller row rather than pinning icons to the top.
+            local leftContent = ancestor:FindFirstChild("LeftContent")
+            if leftContent then
+                leftContent.AnchorPoint = Vector2.new(0, 0.5)
+                leftContent.Position = UDim2.new(0, 0, 0.5, 0)
+            end
+            local rightContent = ancestor:FindFirstChild("RightContent")
+            if rightContent then
+                rightContent.AnchorPoint = Vector2.new(1, 0.5)
+                rightContent.Position = UDim2.new(1, 0, 0.5, 0)
+            end
+            return ancestor
+        end
+        ancestor = ancestor.Parent
+    end
+end
+
+SyllinseRuntime.attachFeatureNotificationBell = function(label, toggleControl, featureFlag)
     if not label or not label.RightContent or not toggleControl or not featureFlag then return end
     local rightContent = label.RightContent
     if not rightContent.Parent then return end
@@ -2440,28 +2826,41 @@ local function attachFeatureNotificationBell(label, toggleControl, featureFlag)
     -- have a keybind control, and must not get an orphan notification icon.
     local settingsIcon = rightContent:FindFirstChild("Settings")
     if not settingsIcon or not settingsIcon:IsA("GuiObject") then return end
+    if (touchInputEnabled and not UserInputService.KeyboardEnabled) then
+        -- Keep the gear artwork at its original aspect ratio. The mobile styling pass
+        -- enlarges its hit target later and renders the artwork in a separate fitted label.
+        Lumen._SyllinseExpandMobileControlRow(settingsIcon, 40)
+    end
 
     local existingBell = rightContent:FindFirstChild("FeatureNotificationBell_" .. featureFlag)
-    if existingBell then return existingBell end
-
-    if featureNotificationSettings[featureFlag] == nil then
-        featureNotificationSettings[featureFlag] = false
+    if existingBell then
+        if (touchInputEnabled and not UserInputService.KeyboardEnabled) then
+            Lumen._SyllinseExpandMobileControlRow(existingBell, 40)
+        end
+        return existingBell
     end
-    toggleControl.NotifyEnabled = featureNotificationSettings[featureFlag] == true
+
+    if SyllinseRuntime.featureNotificationSettings[featureFlag] == nil then
+        SyllinseRuntime.featureNotificationSettings[featureFlag] = false
+    end
+    toggleControl.NotifyEnabled = SyllinseRuntime.featureNotificationSettings[featureFlag] == true
 
     local bell = Instance.new("ImageButton")
     bell.Name = "FeatureNotificationBell_" .. featureFlag
+    -- Keep the underlying artwork at its original size. On phones, the styling pass
+    -- adds a larger transparent hit target and a separate aspect-preserving visual.
     bell.Size = UDim2.fromOffset(14, 14)
     bell.BackgroundTransparency = 1
     bell.BackgroundColor3 = Theme.SurfaceHover
     bell.BorderSizePixel = 0
     bell.AutoButtonColor = false
     bell.Image = "rbxassetid://10709775704"
-    bell.ImageColor3 = featureNotificationSettings[featureFlag] and Theme.Text or Theme.Dim
+    bell.ImageColor3 = SyllinseRuntime.featureNotificationSettings[featureFlag] and Theme.Text or Theme.Dim
     bell.ScaleType = Enum.ScaleType.Fit
     bell.LayoutOrder = 1
     bell.ZIndex = 8
     bell.Parent = rightContent
+    Lumen._SyllinseExpandMobileControlRow(bell, 40)
 
     -- Keep the bell immediately LEFT of the keybind/settings gear. Other inline
     -- controls (such as a color picker) stay after the bell/gear pair.
@@ -2478,24 +2877,24 @@ local function attachFeatureNotificationBell(label, toggleControl, featureFlag)
 
     bell:SetAttribute("FeatureFlag", featureFlag)
     bell:SetAttribute("Tooltip", "Toggle notifications for " .. tostring(label.Text or featureFlag))
-    addCorner(bell, 4)
+    addCorner(bell, (touchInputEnabled and not UserInputService.KeyboardEnabled) and 7 or 4)
 
     local activeDot = Instance.new("Frame")
     activeDot.Name = "NotificationEnabledDot"
-    activeDot.Size = UDim2.fromOffset(4, 4)
+    activeDot.Size = (touchInputEnabled and not UserInputService.KeyboardEnabled) and UDim2.fromOffset(5, 5) or UDim2.fromOffset(4, 4)
     activeDot.AnchorPoint = Vector2.new(1, 0)
     activeDot.Position = UDim2.new(1, -1, 0, 0)
     activeDot.BackgroundColor3 = Theme.Text
     activeDot.BorderSizePixel = 0
-    activeDot.Visible = featureNotificationSettings[featureFlag] == true
+    activeDot.Visible = SyllinseRuntime.featureNotificationSettings[featureFlag] == true
     activeDot.ZIndex = 9
     activeDot.Parent = bell
     addCorner(activeDot, 4)
 
     local function refreshBell()
-        local enabled = featureNotificationSettings[featureFlag] == true
+        local enabled = SyllinseRuntime.featureNotificationSettings[featureFlag] == true
         toggleControl.NotifyEnabled = enabled
-        featureSettings.FeatureNotifications[featureFlag] = enabled
+        SyllinseRuntime.featureSettings.FeatureNotifications[featureFlag] = enabled
         bell.ImageColor3 = enabled and Theme.Text or Theme.Dim
         activeDot.Visible = enabled
     end
@@ -2506,10 +2905,10 @@ local function attachFeatureNotificationBell(label, toggleControl, featureFlag)
     end)
     bell.MouseLeave:Connect(function()
         bell.BackgroundTransparency = 1
-        bell.ImageColor3 = featureNotificationSettings[featureFlag] and Theme.Text or Theme.Dim
+        bell.ImageColor3 = SyllinseRuntime.featureNotificationSettings[featureFlag] and Theme.Text or Theme.Dim
     end)
     bell.Activated:Connect(function()
-        featureNotificationSettings[featureFlag] = not (featureNotificationSettings[featureFlag] == true)
+        SyllinseRuntime.featureNotificationSettings[featureFlag] = not (SyllinseRuntime.featureNotificationSettings[featureFlag] == true)
         refreshBell()
         -- Deliberately do not toast here: clicking the bell changes preference only.
     end)
@@ -2518,25 +2917,25 @@ local function attachFeatureNotificationBell(label, toggleControl, featureFlag)
     return bell
 end
 
-local NOTIFICATION_POSITIONS = { "Top Left", "Top Right", "Bottom Left", "Bottom Right" }
-local function applyNotificationPosition(position)
-    if type(position) ~= "string" or not table.find(NOTIFICATION_POSITIONS, position) then
+SyllinseRuntime.NOTIFICATION_POSITIONS = { "Top Left", "Top Right", "Bottom Left", "Bottom Right" }
+SyllinseRuntime.applyNotificationPosition = function(position)
+    if type(position) ~= "string" or not table.find(SyllinseRuntime.NOTIFICATION_POSITIONS, position) then
         return false
     end
     Lumen.NotifyPosition = position
-    return setNotificationPosition(position)
+    return SyllinseRuntime.setNotificationPosition(position)
 end
 
-setNotificationPosition(Lumen.NotifyPosition or "Top Right")
+SyllinseRuntime.setNotificationPosition(Lumen.NotifyPosition or "Top Right")
 
 -- Mobile touch integrations adapted from MacLib while keeping Syllinse's existing visuals.
 -- A vertical swipe through a scroll container should scroll, not accidentally toggle a row.
-local mobileScrollGuards = {}
-local mobileScrollDispatcherInstalled = false
-local mobileScrollInputChangedConnection
-local mobileScrollInputEndedConnection
+SyllinseRuntime.mobileScrollGuards = {}
+SyllinseRuntime.mobileScrollDispatcherInstalled = false
+SyllinseRuntime.mobileScrollInputChangedConnection = nil
+SyllinseRuntime.mobileScrollInputEndedConnection = nil
 
-local function setGuardedButtonInteractable(state, button, desiredState)
+SyllinseRuntime.setGuardedButtonInteractable = function(state, button, desiredState)
     if not button or not button.Parent or not button:IsA("GuiButton") then return end
     if desiredState then
         local original = state.OriginalInteractable[button]
@@ -2554,7 +2953,7 @@ local function setGuardedButtonInteractable(state, button, desiredState)
     end
 end
 
-local function setMobileScrollState(state, scrolling)
+SyllinseRuntime.setMobileScrollState = function(state, scrolling)
     if not state or state.Destroyed then return end
     state.Scrolling = scrolling == true
     pcall(function()
@@ -2564,7 +2963,7 @@ local function setMobileScrollState(state, scrolling)
     if state.Scrolling then
         for _, descendant in ipairs(state.Frame:GetDescendants()) do
             if descendant:IsA("GuiButton") then
-                setGuardedButtonInteractable(state, descendant, false)
+                SyllinseRuntime.setGuardedButtonInteractable(state, descendant, false)
             end
         end
     else
@@ -2577,7 +2976,7 @@ local function setMobileScrollState(state, scrolling)
     end
 end
 
-local function bindMobileScrollGuard(scrollFrame)
+SyllinseRuntime.bindMobileScrollGuard = function(scrollFrame)
     if not touchInputEnabled or not scrollFrame or not scrollFrame:IsA("ScrollingFrame") then return end
     if scrollFrame:GetAttribute("_syllinseTouchGuardBound") then return end
     scrollFrame:SetAttribute("_syllinseTouchGuardBound", true)
@@ -2593,68 +2992,68 @@ local function bindMobileScrollGuard(scrollFrame)
         OriginalInteractable = {},
         Destroyed = false,
     }
-    table.insert(mobileScrollGuards, state)
+    table.insert(SyllinseRuntime.mobileScrollGuards, state)
 
     scrollFrame.InputBegan:Connect(function(input)
         if input.UserInputType ~= Enum.UserInputType.Touch then return end
         state.ActiveInput = input
         state.StartPosition = Vector2.new(input.Position.X, input.Position.Y)
-        if state.Scrolling then setMobileScrollState(state, false) end
+        if state.Scrolling then SyllinseRuntime.setMobileScrollState(state, false) end
     end)
     scrollFrame.InputChanged:Connect(function(input)
         if input.UserInputType ~= Enum.UserInputType.Touch or not state.ActiveInput then return end
         local point = Vector2.new(input.Position.X, input.Position.Y)
         local delta = point - (state.StartPosition or point)
         if math.abs(delta.Y) > 8 and math.abs(delta.Y) > math.abs(delta.X) then
-            setMobileScrollState(state, true)
+            SyllinseRuntime.setMobileScrollState(state, true)
         end
     end)
     scrollFrame.DescendantAdded:Connect(function(descendant)
         if state.Scrolling and descendant:IsA("GuiButton") then
-            setGuardedButtonInteractable(state, descendant, false)
+            SyllinseRuntime.setGuardedButtonInteractable(state, descendant, false)
         end
     end)
     scrollFrame.Destroying:Connect(function()
-        setMobileScrollState(state, false)
+        SyllinseRuntime.setMobileScrollState(state, false)
         state.Destroyed = true
-        for index = #mobileScrollGuards, 1, -1 do
-            if mobileScrollGuards[index] == state then
-                table.remove(mobileScrollGuards, index)
+        for index = #SyllinseRuntime.mobileScrollGuards, 1, -1 do
+            if SyllinseRuntime.mobileScrollGuards[index] == state then
+                table.remove(SyllinseRuntime.mobileScrollGuards, index)
                 break
             end
         end
-        if #mobileScrollGuards == 0 then
-            if mobileScrollInputChangedConnection then mobileScrollInputChangedConnection:Disconnect() end
-            if mobileScrollInputEndedConnection then mobileScrollInputEndedConnection:Disconnect() end
-            mobileScrollInputChangedConnection = nil
-            mobileScrollInputEndedConnection = nil
-            mobileScrollDispatcherInstalled = false
+        if #SyllinseRuntime.mobileScrollGuards == 0 then
+            if SyllinseRuntime.mobileScrollInputChangedConnection then SyllinseRuntime.mobileScrollInputChangedConnection:Disconnect() end
+            if SyllinseRuntime.mobileScrollInputEndedConnection then SyllinseRuntime.mobileScrollInputEndedConnection:Disconnect() end
+            SyllinseRuntime.mobileScrollInputChangedConnection = nil
+            SyllinseRuntime.mobileScrollInputEndedConnection = nil
+            SyllinseRuntime.mobileScrollDispatcherInstalled = false
         end
     end)
 
-    if not mobileScrollDispatcherInstalled then
-        mobileScrollDispatcherInstalled = true
-        mobileScrollInputChangedConnection = UserInputService.InputChanged:Connect(function(input)
+    if not SyllinseRuntime.mobileScrollDispatcherInstalled then
+        SyllinseRuntime.mobileScrollDispatcherInstalled = true
+        SyllinseRuntime.mobileScrollInputChangedConnection = UserInputService.InputChanged:Connect(function(input)
             if input.UserInputType ~= Enum.UserInputType.Touch then return end
             local point = Vector2.new(input.Position.X, input.Position.Y)
-            for _, activeState in ipairs(mobileScrollGuards) do
+            for _, activeState in ipairs(SyllinseRuntime.mobileScrollGuards) do
                 if not activeState.Destroyed and activeState.ActiveInput == input then
                     local delta = point - (activeState.StartPosition or point)
                     if math.abs(delta.Y) > 8 and math.abs(delta.Y) > math.abs(delta.X) then
-                        setMobileScrollState(activeState, true)
+                        SyllinseRuntime.setMobileScrollState(activeState, true)
                     end
                 end
             end
         end)
-        mobileScrollInputEndedConnection = UserInputService.InputEnded:Connect(function(input)
+        SyllinseRuntime.mobileScrollInputEndedConnection = UserInputService.InputEnded:Connect(function(input)
             if input.UserInputType ~= Enum.UserInputType.Touch then return end
-            for _, activeState in ipairs(mobileScrollGuards) do
+            for _, activeState in ipairs(SyllinseRuntime.mobileScrollGuards) do
                 if activeState.ActiveInput
                     and (input == activeState.ActiveInput or activeState.ActiveInput.UserInputState == Enum.UserInputState.End) then
                     local endedInput = activeState.ActiveInput
                     task.delay(0.05, function()
                         if not activeState.Destroyed and activeState.ActiveInput == endedInput then
-                            setMobileScrollState(activeState, false)
+                            SyllinseRuntime.setMobileScrollState(activeState, false)
                             activeState.ActiveInput = nil
                             activeState.StartPosition = nil
                         end
@@ -2665,16 +3064,16 @@ local function bindMobileScrollGuard(scrollFrame)
     end
 end
 
-local mobileActionButtons = {}
-local mobileActionButtonsEnabled = false
-local actionCameraConnection
-local actionCurrentCameraConnection
-local function clampMobileActionButtonsToViewport()
+SyllinseRuntime.mobileActionButtons = {}
+SyllinseRuntime.mobileActionButtonsEnabled = false
+SyllinseRuntime.actionCameraConnection = nil
+SyllinseRuntime.actionCurrentCameraConnection = nil
+SyllinseRuntime.clampMobileActionButtonsToViewport = function()
     task.defer(function()
         if not mobileActionGui or not mobileActionGui.Parent then return end
         local camera = Workspace.CurrentCamera
         local viewport = camera and camera.ViewportSize or Vector2.new(390, 844)
-        for _, entry in ipairs(mobileActionButtons) do
+        for _, entry in ipairs(SyllinseRuntime.mobileActionButtons) do
             local button = entry.Button
             if button and button.Parent then
                 local position = button.AbsolutePosition
@@ -2688,33 +3087,33 @@ local function clampMobileActionButtonsToViewport()
     end)
 end
 
-local function watchMobileActionCamera(camera)
-    if actionCameraConnection then actionCameraConnection:Disconnect() end
-    actionCameraConnection = nil
+SyllinseRuntime.watchMobileActionCamera = function(camera)
+    if SyllinseRuntime.actionCameraConnection then SyllinseRuntime.actionCameraConnection:Disconnect() end
+    SyllinseRuntime.actionCameraConnection = nil
     if camera then
-        actionCameraConnection = camera:GetPropertyChangedSignal("ViewportSize"):Connect(clampMobileActionButtonsToViewport)
+        SyllinseRuntime.actionCameraConnection = camera:GetPropertyChangedSignal("ViewportSize"):Connect(SyllinseRuntime.clampMobileActionButtonsToViewport)
     end
 end
 
 if mobileActionGui then
-    watchMobileActionCamera(Workspace.CurrentCamera)
-    actionCurrentCameraConnection = Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
-        watchMobileActionCamera(Workspace.CurrentCamera)
-        clampMobileActionButtonsToViewport()
+    SyllinseRuntime.watchMobileActionCamera(Workspace.CurrentCamera)
+    SyllinseRuntime.actionCurrentCameraConnection = Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+        SyllinseRuntime.watchMobileActionCamera(Workspace.CurrentCamera)
+        SyllinseRuntime.clampMobileActionButtonsToViewport()
     end)
     mobileActionGui.Destroying:Connect(function()
-        for _, entry in ipairs(mobileActionButtons) do
+        for _, entry in ipairs(SyllinseRuntime.mobileActionButtons) do
             if entry.InputChangedConnection then entry.InputChangedConnection:Disconnect() end
             if entry.InputEndedConnection then entry.InputEndedConnection:Disconnect() end
         end
-        if actionCameraConnection then actionCameraConnection:Disconnect() end
-        if actionCurrentCameraConnection then actionCurrentCameraConnection:Disconnect() end
-        actionCameraConnection = nil
-        actionCurrentCameraConnection = nil
+        if SyllinseRuntime.actionCameraConnection then SyllinseRuntime.actionCameraConnection:Disconnect() end
+        if SyllinseRuntime.actionCurrentCameraConnection then SyllinseRuntime.actionCurrentCameraConnection:Disconnect() end
+        SyllinseRuntime.actionCameraConnection = nil
+        SyllinseRuntime.actionCurrentCameraConnection = nil
     end)
 end
 
-local function refreshMobileActionButton(entry, state)
+SyllinseRuntime.refreshMobileActionButton = function(entry, state)
     if not entry then return end
     entry.Active = state == true
     local button = entry.Button
@@ -2726,30 +3125,30 @@ local function refreshMobileActionButton(entry, state)
     entry.Stroke.Transparency = entry.Active and 0.12 or 0.08
 end
 
-local function syncMobileActionButtons(featureFlag, state)
-    for _, entry in ipairs(mobileActionButtons) do
+SyllinseRuntime.syncMobileActionButtons = function(featureFlag, state)
+    for _, entry in ipairs(SyllinseRuntime.mobileActionButtons) do
         if entry.FeatureFlag == featureFlag then
-            refreshMobileActionButton(entry, state)
+            SyllinseRuntime.refreshMobileActionButton(entry, state)
         end
     end
 end
 
-local function setMobileActionButtonsVisible(state)
-    mobileActionButtonsEnabled = state == true
-    featureSettings.MobileActionButtons = mobileActionButtonsEnabled
-    for _, entry in ipairs(mobileActionButtons) do
+SyllinseRuntime.setMobileActionButtonsVisible = function(state)
+    SyllinseRuntime.mobileActionButtonsEnabled = state == true
+    SyllinseRuntime.featureSettings.MobileActionButtons = SyllinseRuntime.mobileActionButtonsEnabled
+    for _, entry in ipairs(SyllinseRuntime.mobileActionButtons) do
         if entry.Button and entry.Button.Parent then
-            entry.Button.Visible = mobileActionButtonsEnabled or entry.ManualVisible == true
+            entry.Button.Visible = SyllinseRuntime.mobileActionButtonsEnabled or entry.ManualVisible == true
         end
     end
 end
 
-local function setMobileActionButtonVisibility(keybindFlag, state)
-    for _, entry in ipairs(mobileActionButtons) do
+SyllinseRuntime.setMobileActionButtonVisibility = function(keybindFlag, state)
+    for _, entry in ipairs(SyllinseRuntime.mobileActionButtons) do
         if entry.KeybindFlag == keybindFlag then
             entry.ManualVisible = state == true
             if entry.Button and entry.Button.Parent then
-                entry.Button.Visible = mobileActionButtonsEnabled or entry.ManualVisible
+                entry.Button.Visible = SyllinseRuntime.mobileActionButtonsEnabled or entry.ManualVisible
             end
             return true
         end
@@ -2760,16 +3159,16 @@ end
 -- Lumen's provided Toggle:Set implementation treats a false argument as a toggle
 -- request. Normalize that edge case once per toggle so false defaults and config loads
 -- remain accurate while retaining Lumen's native animation/callback/flag behavior.
-local function addToggle(label, options)
+SyllinseRuntime.addToggle = function(label, options)
     local opts = options or {}
     local requestedState = opts.State == true
     local featureFlag = type(opts.Flag) == "string" and opts.Flag or nil
-    local hasFeatureNotifications = featureFlag ~= nil and FEATURE_NOTIFICATION_FLAGS[featureFlag] == true
+    local hasFeatureNotifications = featureFlag ~= nil and SyllinseRuntime.FEATURE_NOTIFICATION_FLAGS[featureFlag] == true
     if hasFeatureNotifications then
-        if featureNotificationSettings[featureFlag] == nil then
-            featureNotificationSettings[featureFlag] = false
+        if SyllinseRuntime.featureNotificationSettings[featureFlag] == nil then
+            SyllinseRuntime.featureNotificationSettings[featureFlag] = false
         end
-        opts.NotifyEnabled = featureNotificationSettings[featureFlag] == true
+        opts.NotifyEnabled = SyllinseRuntime.featureNotificationSettings[featureFlag] == true
     else
         -- Do not let unrelated controls emit native toggle toasts.
         opts.NotifyEnabled = false
@@ -2777,15 +3176,15 @@ local function addToggle(label, options)
     local control = label:Toggle(opts)
     if hasFeatureNotifications then
         task.defer(function()
-            attachFeatureNotificationBell(label, control, featureFlag)
+            SyllinseRuntime.attachFeatureNotificationBell(label, control, featureFlag)
         end)
     end
     local originalSet = control.Set
     local currentState = control.State == true
 
-    -- Keep Lumen's native toggle behavior and geometry, but use a visible medium-gray
-    -- off track and Syllinse's softer gray on track. Reapply after Lumen's
-    -- own state tween so the track and thumb stay visually consistent.
+    -- Keep Lumen's native toggle behavior and geometry, but use a visible charcoal
+    -- off track. Lumen's internal click handler tweens the track back to near-black,
+    -- so the style is also re-applied after native activation/state animations.
     local function applySyllinseToggleStyle(isOn)
         local frame = control and control.Frame
         if not frame or not frame.Parent then return end
@@ -2798,8 +3197,44 @@ local function addToggle(label, options)
         end
         if not track then return end
 
-        track.Size = UDim2.fromOffset(34, 18)
-        track.BackgroundColor3 = isOn and Theme.PanelTitle or Theme.SliderTrack
+        -- Keep one consistent base switch size on each device type. A child UIScale
+        -- counteracts the shell's global scaling so the switch stays easy to use even
+        -- when the user lowers the overall UI-size slider.
+        local touchFirst = touchInputEnabled and not UserInputService.KeyboardEnabled
+        local baseSwitchWidth = touchFirst and 42 or 34
+        local baseSwitchHeight = touchFirst and 26 or 18
+        track:SetAttribute("SyllinseBaseSwitchWidth", baseSwitchWidth)
+        track:SetAttribute("SyllinseBaseSwitchHeight", baseSwitchHeight)
+        track.Size = UDim2.fromOffset(baseSwitchWidth, baseSwitchHeight)
+        local switchScale = track:FindFirstChild("SyllinseSwitchScaleCompensation")
+        if not switchScale then
+            switchScale = Instance.new("UIScale")
+            switchScale.Name = "SyllinseSwitchScaleCompensation"
+            switchScale.Parent = track
+        end
+        switchScale.Scale = 1 / math.max(responsiveScaleValue, 0.25)
+
+        -- Reserve enough row height for the switch at the current UI scale. Keep
+        -- the original row height so the layout can recover cleanly when scale changes.
+        local switchRow = track.Parent
+        while switchRow and switchRow ~= root do
+            if switchRow.Name == "LabelFrame" then
+                if switchRow:GetAttribute("SyllinseToggleBaseRowHeight") == nil then
+                    switchRow:SetAttribute("SyllinseToggleBaseRowHeight", switchRow.Size.Y.Offset)
+                end
+                local baseHeight = switchRow:GetAttribute("SyllinseToggleBaseRowHeight") or switchRow.Size.Y.Offset
+                local minimumPhysicalHeight = touchFirst and 40 or 24
+                local targetHeight = math.max(baseHeight, minimumPhysicalHeight / math.max(responsiveScaleValue, 0.25))
+                if switchRow.Size.Y.Scale == 0 then
+                    switchRow.Size = UDim2.new(switchRow.Size.X.Scale, switchRow.Size.X.Offset, 0, math.ceil(targetHeight))
+                    switchRow.ClipsDescendants = false
+                end
+                break
+            end
+            switchRow = switchRow.Parent
+        end
+
+        track.BackgroundColor3 = isOn and Theme.PanelTitle or Theme.ToggleOffTrack
         track.BackgroundTransparency = 0
         track.AutoButtonColor = false
         track.ClipsDescendants = true
@@ -2811,12 +3246,48 @@ local function addToggle(label, options)
             addCorner(track, 9)
         end
 
+        -- Lumen calls the switch thumb "Indicator". Scale and reposition it with the
+        -- larger mobile switch so the thumb remains centered and easy to see.
+        if (touchInputEnabled and not UserInputService.KeyboardEnabled) then
+            local indicator = track:FindFirstChild("Indicator")
+            if indicator and indicator:IsA("GuiObject") then
+                indicator.Size = UDim2.fromOffset(16, 16)
+                indicator.BackgroundColor3 = isOn and Theme.Text or Theme.ToggleOffThumb
+                indicator.BackgroundTransparency = 0
+                if isOn then
+                    indicator.AnchorPoint = Vector2.new(1, 0.5)
+                    indicator.Position = UDim2.new(1, -5, 0.5, 0)
+                else
+                    indicator.AnchorPoint = Vector2.new(0, 0.5)
+                    indicator.Position = UDim2.new(0, 5, 0.5, 0)
+                end
+            end
+        end
+
         local trackStroke = track:FindFirstChildOfClass("UIStroke")
         if not trackStroke then
             trackStroke = addStroke(track, Theme.Stroke, 0.12, 1)
         end
         trackStroke.Color = isOn and Theme.PanelTitle or Theme.Stroke
         trackStroke.Transparency = isOn and 0.22 or 0.08
+
+        -- Lumen's own click handler can overwrite BackgroundColor3 after the wrapper's
+        -- Set() call, and normal clicks do not necessarily call the public Set method.
+        -- Bind the native Activated event once, then repaint after its state/tween work.
+        if track:GetAttribute("SyllinseToggleStyleBound") ~= true then
+            track:SetAttribute("SyllinseToggleStyleBound", true)
+            track.Activated:Connect(function()
+                for _, delaySeconds in ipairs({0, 0.04, 0.10, 0.20, 0.34}) do
+                    task.delay(delaySeconds, function()
+                        if not control or not control.Frame or not control.Frame.Parent then return end
+                        if type(control.State) == "boolean" then
+                            currentState = control.State
+                        end
+                        applySyllinseToggleStyle(currentState)
+                    end)
+                end
+            end)
+        end
 
         for _, part in ipairs(track:GetDescendants()) do
             local partName = string.lower(part.Name or "")
@@ -2825,10 +3296,10 @@ local function addToggle(label, options)
                 or partName:find("handle", 1, true)
             if isThumb and part:IsA("GuiObject") then
                 if part:IsA("ImageLabel") or part:IsA("ImageButton") then
-                    part.ImageColor3 = isOn and Theme.Text or Theme.PanelIcon
+                    part.ImageColor3 = isOn and Theme.Text or Theme.ToggleOffThumb
                     part.ImageTransparency = 0
                 else
-                    part.BackgroundColor3 = isOn and Theme.Text or Theme.PanelIcon
+                    part.BackgroundColor3 = isOn and Theme.Text or Theme.ToggleOffThumb
                     part.BackgroundTransparency = 0
                 end
                 local thumbCorner = part:FindFirstChildOfClass("UICorner")
@@ -2850,19 +3321,23 @@ local function addToggle(label, options)
         end
         currentState = state
         originalSet(state, silent)
-        task.defer(function() applySyllinseToggleStyle(currentState) end)
-        task.delay(0.16, function()
+        task.defer(function()
+            if type(control.State) == "boolean" then currentState = control.State end
+            applySyllinseToggleStyle(currentState)
+        end)
+        task.delay(0.20, function()
             if control and control.Frame and control.Frame.Parent then
+                if type(control.State) == "boolean" then currentState = control.State end
                 applySyllinseToggleStyle(currentState)
             end
         end)
-        syncMobileActionButtons(featureFlag, currentState)
+        SyllinseRuntime.syncMobileActionButtons(featureFlag, currentState)
         if control.Flag and Lumen.Flags[control.Flag] then
             Lumen.Flags[control.Flag].Value = currentState
             Lumen.Flags[control.Flag].Set = control.Set
         end
-        if hasFeatureNotifications and not silent and featureNotificationSettings[featureFlag] == true then
-            notify(opts.Name or featureFlag, currentState and "Enabled" or "Disabled",
+        if hasFeatureNotifications and not silent and SyllinseRuntime.featureNotificationSettings[featureFlag] == true then
+            SyllinseRuntime.notify(opts.Name or featureFlag, currentState and "Enabled" or "Disabled",
                 currentState and "Success" or "Info", opts.NotificationDuration or 2.5)
         end
         return currentState
@@ -2878,7 +3353,7 @@ local function addToggle(label, options)
     return control
 end
 
-local MOBILE_ACTION_LABELS = {
+SyllinseRuntime.MOBILE_ACTION_LABELS = {
     AimbotKey = "AIM",
     SilentAimKey = "SILENT",
     SilentKey = "SILENT",
@@ -2887,15 +3362,15 @@ local MOBILE_ACTION_LABELS = {
     FlyKey = "FLY",
 }
 
-local function createMobileActionButton(keybindFlag, featureFlag, callback, initialState)
+SyllinseRuntime.createMobileActionButton = function(keybindFlag, featureFlag, callback, initialState)
     if not mobileActionGui or type(callback) ~= "function" then return nil end
-    local index = #mobileActionButtons + 1
-    local label = MOBILE_ACTION_LABELS[keybindFlag] or tostring(keybindFlag or "ACTION")
+    local index = #SyllinseRuntime.mobileActionButtons + 1
+    local label = SyllinseRuntime.MOBILE_ACTION_LABELS[keybindFlag] or tostring(keybindFlag or "ACTION")
 
     local viewportCamera = Workspace.CurrentCamera
     local viewportHeight = viewportCamera and viewportCamera.ViewportSize.Y or 844
     local buttonHeight = 34
-    local stackTop = math.min(viewportHeight * 0.34, math.max(8, viewportHeight - (#mobileActionButtons + 1) * 42 - 8))
+    local stackTop = math.min(viewportHeight * 0.34, math.max(8, viewportHeight - (#SyllinseRuntime.mobileActionButtons + 1) * 42 - 8))
     local labelWidths = { AIM = 64, SILENT = 78, TRIGGER = 84, ["ANTI-AIM"] = 92, FLY = 60 }
     local button = Instance.new("TextButton")
     button.Name = "SyllinseMobileAction_" .. tostring(keybindFlag or index)
@@ -2931,8 +3406,8 @@ local function createMobileActionButton(keybindFlag, featureFlag, callback, init
         ManualVisible = false,
         DragInput = nil,
     }
-    table.insert(mobileActionButtons, entry)
-    refreshMobileActionButton(entry, initialState)
+    table.insert(SyllinseRuntime.mobileActionButtons, entry)
+    SyllinseRuntime.refreshMobileActionButton(entry, initialState)
 
     -- Same touch/mouse drag-and-release pattern as MacLib's mobile keybind API.
     -- A short tap toggles the linked feature; dragging only repositions the button.
@@ -2987,14 +3462,14 @@ local function createMobileActionButton(keybindFlag, featureFlag, callback, init
             local ok, err = pcall(callback, nextState)
             if not ok then warn("[Syllinse] Mobile action failed: " .. tostring(err)) end
             -- If the callback is not linked to a toggle, still show the local action state.
-            refreshMobileActionButton(entry, nextState)
+            SyllinseRuntime.refreshMobileActionButton(entry, nextState)
         end
     end)
 
     return entry
 end
 
-local function attachKeybindSetting(label, options, settingName, linkedToggleControl)
+SyllinseRuntime.attachKeybindSetting = function(label, options, settingName, linkedToggleControl)
     -- Lumen's Keybind callback reports the active state, but does not automatically
     -- toggle the feature's separate main switch. Link those two controls so a hotkey
     -- actually updates the same state as clicking the feature toggle.
@@ -3015,11 +3490,11 @@ local function attachKeybindSetting(label, options, settingName, linkedToggleCon
 
     local control = label:Keybind(keybindOptions)
     if settingName then
-        featureSettings[settingName] = control.Key
+        SyllinseRuntime.featureSettings[settingName] = control.Key
         local originalSet = control.Set
         control.Set = function(key)
             originalSet(key)
-            featureSettings[settingName] = key
+            SyllinseRuntime.featureSettings[settingName] = key
             if control.Flag and Lumen.Flags[control.Flag] then
                 Lumen.Flags[control.Flag].Value = key
                 Lumen.Flags[control.Flag].Set = control.Set
@@ -3032,7 +3507,7 @@ local function attachKeybindSetting(label, options, settingName, linkedToggleCon
 
     if touchInputEnabled and linkedToggleControl and type(keybindOptions.Callback) == "function" then
         local initialState = linkedToggleControl.State == true
-        createMobileActionButton(
+        SyllinseRuntime.createMobileActionButton(
             settingName or keybindOptions.Flag,
             linkedToggleControl.Flag,
             keybindOptions.Callback,
@@ -3043,14 +3518,14 @@ local function attachKeybindSetting(label, options, settingName, linkedToggleCon
     -- Match MacLib's per-keybind visibility API while leaving Lumen's native keybind control intact.
     control.SetMobileButtonVisibility = function(selfOrState, state)
         if selfOrState == control then
-            return setMobileActionButtonVisibility(settingName or keybindOptions.Flag, state)
+            return SyllinseRuntime.setMobileActionButtonVisibility(settingName or keybindOptions.Flag, state)
         end
-        return setMobileActionButtonVisibility(settingName or keybindOptions.Flag, selfOrState)
+        return SyllinseRuntime.setMobileActionButtonVisibility(settingName or keybindOptions.Flag, selfOrState)
     end
     return control
 end
 
-local function makePage(name, icon)
+SyllinseRuntime.makePage = function(name, icon)
     local page = LumenWindow:Page({ Icon = icon })
     local pageFrame = page.Frame
     local leftColumn = pageFrame and pageFrame:FindFirstChild("Left")
@@ -3110,7 +3585,7 @@ local function makePage(name, icon)
     mobileHost.Active = true
     mobileHost.ZIndex = 5
     mobileHost.Parent = root
-    bindMobileScrollGuard(mobileHost)
+    SyllinseRuntime.bindMobileScrollGuard(mobileHost)
 
     local mobilePadding = Instance.new("UIPadding")
     mobilePadding.Name = "SyllinseMobileColumnPadding"
@@ -3157,18 +3632,18 @@ local function makePage(name, icon)
     return page
 end
 
-local pages = {
-    Combat = makePage("Combat", "swords"),
-    Desync = makePage("Desync", "activity"),
-    Visuals = makePage("Visuals", "eye"),
-    Configs = makePage("Configs", "save"),
-    Misc = makePage("Misc", "wrench"),
-    Settings = makePage("Settings", "settings"),
+SyllinseRuntime.pages = {
+    Combat = SyllinseRuntime.makePage("Combat", "swords"),
+    Desync = SyllinseRuntime.makePage("Desync", "activity"),
+    Visuals = SyllinseRuntime.makePage("Visuals", "eye"),
+    Configs = SyllinseRuntime.makePage("Configs", "save"),
+    Misc = SyllinseRuntime.makePage("Misc", "wrench"),
+    Settings = SyllinseRuntime.makePage("Settings", "settings"),
 }
 
 -- Bind MacLib-style scroll guards to the visible outer scroll containers in Lumen's
 -- separate popup layers (for example, dropdown option lists). Avoid nested guards.
-local function watchOuterMobileScrollFrames(layer)
+SyllinseRuntime.watchOuterMobileScrollFrames = function(layer)
     if not touchInputEnabled or not layer then return end
     local function consider(instance)
         if not instance:IsA("ScrollingFrame") then return end
@@ -3177,15 +3652,15 @@ local function watchOuterMobileScrollFrames(layer)
             if parent:IsA("ScrollingFrame") then return end
             parent = parent.Parent
         end
-        bindMobileScrollGuard(instance)
+        SyllinseRuntime.bindMobileScrollGuard(instance)
     end
     for _, descendant in ipairs(layer:GetDescendants()) do consider(descendant) end
     layer.DescendantAdded:Connect(function(descendant)
         if descendant:IsA("ScrollingFrame") then task.defer(consider, descendant) end
     end)
 end
-watchOuterMobileScrollFrames(Lumen._Instance)
-watchOuterMobileScrollFrames(Lumen._Overlay)
+SyllinseRuntime.watchOuterMobileScrollFrames(Lumen._Instance)
+SyllinseRuntime.watchOuterMobileScrollFrames(Lumen._Overlay)
 
 -- Responsive shell layout. Desktop styling is untouched; touch phones use a slimmer
 -- icon rail, a two-row header, and one full-width vertical scroll stack for Lumen panels.
@@ -3211,23 +3686,33 @@ layoutResponsiveShell = function()
         dragHandle.Size = UDim2.new(1, -76, 0, 54)
         headerTitle.Size = UDim2.new(1, -112, 0, 34)
         avatar.Visible = false
-        logo.Size = UDim2.fromOffset(48, 54)
-        logo.Position = UDim2.fromOffset(4, 1)
+        logo.Size = UDim2.fromOffset(52, 58)
+        logo.Position = UDim2.fromOffset(3, 0)
+        -- Keep the colored glow subtle on narrow phone rails instead of letting it
+        -- spill into the feature panels.
+        logoGlowCyan.Size = UDim2.fromOffset(76, 76)
+        logoGlowCyan.Position = UDim2.fromOffset(-9, -9)
+        logoGlowViolet.Size = UDim2.fromOffset(70, 72)
+        logoGlowViolet.Position = UDim2.fromOffset(-6, -7)
         local logoFallback = sidebar:FindFirstChild("ImageFallback")
         if logoFallback then
-            logoFallback.Size = UDim2.fromOffset(44, 44)
-            logoFallback.Position = UDim2.fromOffset(7, 7)
+            logoFallback.Size = UDim2.fromOffset(46, 46)
+            logoFallback.Position = UDim2.fromOffset(6, 6)
         end
     else
         searchFrame.AnchorPoint = Vector2.new(1, 0)
         searchFrame.Position = UDim2.new(1, -54, 0, 13)
         searchFrame.Size = UDim2.fromOffset(math.clamp(canvasW - railWidth - 420, 190, 242), 46)
         avatar.Visible = canvasW >= 850
-        avatar.Position = UDim2.new(1, -364, 0, 15)
+        avatar.Position = UDim2.new(1, -354, 0, 15)
         dragHandle.Size = UDim2.new(0, math.max(180, math.min(470, canvasW - railWidth - 360)), 1, 0)
         headerTitle.Size = UDim2.new(0, 250, 0, 34)
-        logo.Size = UDim2.fromOffset(88, 96)
-        logo.Position = UDim2.fromOffset(-5, -7)
+        logo.Size = UDim2.fromOffset(92, 100)
+        logo.Position = UDim2.fromOffset(-7, -9)
+        logoGlowCyan.Size = UDim2.fromOffset(102, 102)
+        logoGlowCyan.Position = UDim2.fromOffset(-13, -11)
+        logoGlowViolet.Size = UDim2.fromOffset(98, 100)
+        logoGlowViolet.Position = UDim2.fromOffset(-10, -9)
         local logoFallback = sidebar:FindFirstChild("ImageFallback")
         if logoFallback then
             logoFallback.Size = UDim2.fromOffset(60, 60)
@@ -3323,213 +3808,504 @@ layoutResponsiveShell = function()
         end
     end
 
-    if launcher and showLauncherButton then
-        launcher.Position = UDim2.new(0.5, 0, 0.5, mobileSafeOffsetY)
-    end
+    -- Deliberately do not reset launcher.Position here. layoutResponsiveShell can run
+    -- after resize/orientation changes; resetting it would teleport a dragged launcher.
     if baseWindowSize then baseWindowSize = root.Size end
+end
+
+-- Make each slider's displayed number directly editable without replacing its
+-- native Lumen slider. The field is positioned over the existing value readout,
+-- and routes numeric edits through the same native Set/Callback path as dragging.
+SyllinseRuntime.addNumericSlider = function(section, options)
+    local sliderOptions = table.clone(options or {})
+    local userCallback = sliderOptions.Callback
+    local currentValue = tonumber(sliderOptions.Value) or tonumber(sliderOptions.Min) or 0
+    local minimum = tonumber(sliderOptions.Min) or 0
+    local maximum = tonumber(sliderOptions.Max) or 100
+    local increment = math.max(tonumber(sliderOptions.Increment) or 1, 0.000001)
+    local suffix = type(sliderOptions.Suffix) == "string" and string.gsub(sliderOptions.Suffix, "^%s+", "") or ""
+    local numericEditor
+    local nativeValueLabel
+
+    local function snapValue(value)
+        value = tonumber(value)
+        if not value then return currentValue end
+        value = math.clamp(value, minimum, maximum)
+        local steps = math.floor(((value - minimum) / increment) + 0.5)
+        value = minimum + steps * increment
+        return math.clamp(value, minimum, maximum)
+    end
+
+    local function formatNumber(value)
+        local formatted = string.format("%.6f", tonumber(value) or currentValue)
+        formatted = string.gsub(formatted, "0+$", "")
+        formatted = string.gsub(formatted, "%.$", "")
+        if formatted == "" or formatted == "-0" then formatted = "0" end
+        return formatted
+    end
+
+    local function syncEditor(value)
+        currentValue = tonumber(value) or currentValue
+        if numericEditor and numericEditor.Parent and not numericEditor:IsFocused() then
+            numericEditor.Text = formatNumber(currentValue)
+        end
+    end
+
+    sliderOptions.Callback = function(value)
+        currentValue = tonumber(value) or currentValue
+        syncEditor(currentValue)
+        if type(userCallback) == "function" then
+            userCallback(value)
+        end
+    end
+
+    local control = section:Slider(sliderOptions)
+    local nativeSet = control and control.Set
+
+    if type(nativeSet) == "function" then
+        control.Set = function(value, ...)
+            -- Most Lumen calls use dot-style Set(value); accept colon-style calls too.
+            local extraArgs = table.pack(...)
+            if value == control then
+                value = extraArgs[1]
+                local shifted = table.create(math.max(extraArgs.n - 1, 0))
+                for i = 2, extraArgs.n do shifted[i - 1] = extraArgs[i] end
+                extraArgs = table.pack(table.unpack(shifted))
+            end
+            local snapped = snapValue(value)
+            local ok, result = pcall(nativeSet, snapped, table.unpack(extraArgs, 1, extraArgs.n))
+            if not ok then
+                -- Compatibility fallback for library revisions that expect self.
+                ok, result = pcall(nativeSet, control, snapped, table.unpack(extraArgs, 1, extraArgs.n))
+            end
+            currentValue = tonumber(control.Value) or snapped
+            syncEditor(currentValue)
+            if control.Flag and Lumen and Lumen.Flags and Lumen.Flags[control.Flag] then
+                Lumen.Flags[control.Flag].Set = control.Set
+            end
+            return ok and result or nil
+        end
+        if control.Flag and Lumen and Lumen.Flags and Lumen.Flags[control.Flag] then
+            Lumen.Flags[control.Flag].Set = control.Set
+        end
+    end
+
+    local function parseNumericPrefix(text)
+        if type(text) ~= "string" then return nil end
+        local valueText = string.match(text, "^%s*([+-]?%d+%.?%d*)")
+        return valueText and tonumber(valueText) or nil
+    end
+
+    local function findValueLabel(frame)
+        if not frame then return nil end
+        local objects = {}
+        if frame:IsA("TextLabel") or frame:IsA("TextButton") then
+            table.insert(objects, frame)
+        end
+        for _, object in ipairs(frame:GetDescendants()) do
+            if object:IsA("TextLabel") or object:IsA("TextButton") then
+                table.insert(objects, object)
+            end
+        end
+        local best, bestScore = nil, -math.huge
+        for _, object in ipairs(objects) do
+            local name = string.lower(object.Name or "")
+            local number = parseNumericPrefix(object.Text)
+            local score = -math.huge
+            if number ~= nil then
+                score = 10 - math.min(math.abs(number - currentValue), 1000) / 1000
+                if math.abs(number - currentValue) < 0.0001 then score = score + 100 end
+            end
+            if name == "value" or name == "slidervalue" or name == "valuelabel" then
+                score = math.max(score, 500)
+            elseif string.find(name, "value", 1, true) or string.find(name, "number", 1, true) then
+                score = math.max(score, 300)
+            end
+            if string.find(name, "title", 1, true) or name == "name" or name == "label" then
+                score = score - 500
+            end
+            if score > bestScore then
+                best, bestScore = object, score
+            end
+        end
+        return bestScore > 0 and best or nil
+    end
+
+    -- Locate the actual Lumen SliderFrame from the owning section. Lumen's slider
+    -- handle does not consistently expose Frame/Instance/Container, so relying on
+    -- those fields can silently skip creation of the editor entirely.
+    local function findSliderFrame()
+        local sectionFrame = section and (section.Frame or section.Instance or section.Container)
+        if not (sectionFrame and typeof(sectionFrame) == "Instance" and sectionFrame:IsA("GuiObject")) then
+            return nil
+        end
+
+        local expectedTitle = string.lower(string.gsub(tostring(sliderOptions.Name or ""), "^%s*(.-)%s*$", "%1"))
+        local candidates = {}
+        local partialMatch = nil
+        for _, object in ipairs(sectionFrame:GetDescendants()) do
+            if object:IsA("GuiObject") and string.lower(object.Name or "") == "sliderframe" then
+                table.insert(candidates, object)
+                local exactTitleMatch = false
+                local hasPartialTitleMatch = false
+                for _, child in ipairs(object:GetDescendants()) do
+                    if child:IsA("TextLabel") or child:IsA("TextButton") then
+                        local text = string.lower(string.gsub(tostring(child.Text or ""), "^%s*(.-)%s*$", "%1"))
+                        if text == expectedTitle and expectedTitle ~= "" then
+                            exactTitleMatch = true
+                            break
+                        elseif expectedTitle ~= "" and string.find(text, expectedTitle, 1, true) then
+                            hasPartialTitleMatch = true
+                        end
+                    end
+                end
+                if exactTitleMatch then return object end
+                if hasPartialTitleMatch and not partialMatch then partialMatch = object end
+            end
+        end
+        if partialMatch then return partialMatch end
+        if #candidates == 1 then return candidates[1] end
+        return nil
+    end
+
+    task.defer(function()
+        local frame
+        -- Lumen may finish parenting/layout on the next task step. Re-resolve the
+        -- named slider row briefly so every field attaches to its own slider.
+        for attempt = 1, 12 do
+            frame = findSliderFrame()
+            if not (frame and frame:IsA("GuiObject")) then
+                local fallback = control and (control.SliderFrame or control.Frame or control.Instance or control.Container)
+                if fallback and typeof(fallback) == "Instance" and fallback:IsA("GuiObject") and string.lower(fallback.Name or "") == "sliderframe" then
+                    frame = fallback
+                end
+            end
+            if frame and frame.Parent then
+                nativeValueLabel = findValueLabel(frame)
+                if nativeValueLabel or attempt >= 3 then break end
+            end
+            task.wait(0.05)
+        end
+
+        if not (frame and typeof(frame) == "Instance" and frame:IsA("GuiObject") and frame.Parent) then
+            warn("[Syllinse] Could not find the Lumen slider row for numeric editor: " .. tostring(sliderOptions.Name))
+            return
+        end
+
+        local fieldParent = nativeValueLabel and nativeValueLabel.Parent or frame
+        local rightScale, rightOffset = 1, -3
+        local topScale, topOffset = 0, 0
+        if nativeValueLabel and nativeValueLabel.Parent then
+            local labelPosition = nativeValueLabel.Position
+            local labelSize = nativeValueLabel.Size
+            local anchor = nativeValueLabel.AnchorPoint
+            rightScale = labelPosition.X.Scale + (1 - anchor.X) * labelSize.X.Scale
+            rightOffset = labelPosition.X.Offset + (1 - anchor.X) * labelSize.X.Offset
+            topScale = labelPosition.Y.Scale - anchor.Y * labelSize.Y.Scale
+            topOffset = labelPosition.Y.Offset - anchor.Y * labelSize.Y.Offset
+            nativeValueLabel.Visible = false
+        end
+
+        -- Keep the numeric editor visually indistinguishable from Lumen's own value
+        -- readout: compact, transparent, and using the same native type/color. A subtle
+        -- fill/stroke appears only while editing so it remains discoverable without
+        -- creating a large pill that clashes with the rest of the UI.
+        local suffixText = suffix
+        local suffixWidth = suffixText == "" and 0 or math.clamp(#suffixText * 5 + 3, 10, 42)
+        local digitCount = #formatNumber(currentValue)
+        local editorWidth = math.clamp(digitCount * 6 + 5, 24, 42)
+        local nativeTextSize = nativeValueLabel and nativeValueLabel.TextSize or 12
+        local nativeAbsHeight = nativeValueLabel and nativeValueLabel.AbsoluteSize.Y or 0
+        local fieldHeight = math.clamp(nativeAbsHeight > 0 and nativeAbsHeight or (nativeTextSize + 2), 13, 17)
+        local valueRightOffset = rightOffset - suffixWidth - (suffixWidth > 0 and 2 or 0)
+
+        local box = Instance.new("TextBox")
+        box.Name = "SyllinseNumericSliderInput"
+        box.AnchorPoint = Vector2.new(1, 0)
+        box.Position = UDim2.new(rightScale, valueRightOffset, topScale, topOffset - 1)
+        box.Size = UDim2.fromOffset(editorWidth, fieldHeight)
+        box.BackgroundColor3 = Theme.SurfaceHover
+        box.BackgroundTransparency = 1
+        box.BorderSizePixel = 0
+        box.ClearTextOnFocus = false
+        box.Text = formatNumber(currentValue)
+        box.TextColor3 = nativeValueLabel and nativeValueLabel.TextColor3 or Theme.PanelValue
+        box.TextSize = nativeTextSize
+        box.TextTransparency = nativeValueLabel and nativeValueLabel.TextTransparency or 0
+        box.FontFace = nativeValueLabel and nativeValueLabel.FontFace or FONT_REGULAR
+        box.TextXAlignment = Enum.TextXAlignment.Right
+        box.TextYAlignment = nativeValueLabel and nativeValueLabel.TextYAlignment or Enum.TextYAlignment.Center
+        box.TextWrapped = false
+        box.ZIndex = (nativeValueLabel and nativeValueLabel.ZIndex or frame.ZIndex) + 3
+        box.Parent = fieldParent
+        local editorStroke = Instance.new("UIStroke")
+        editorStroke.Name = "SyllinseNumericSliderFocusStroke"
+        editorStroke.Color = Theme.Stroke
+        editorStroke.Transparency = 1
+        editorStroke.Thickness = 1
+        editorStroke.Parent = box
+        addCorner(box, 3)
+        numericEditor = box
+        box:SetAttribute("SyllinseNumericSliderInput", true)
+
+        if suffixText ~= "" then
+            local suffixLabel = Instance.new("TextLabel")
+            suffixLabel.Name = "SyllinseNumericSliderSuffix"
+            suffixLabel.AnchorPoint = Vector2.new(1, 0)
+            suffixLabel.Position = UDim2.new(rightScale, rightOffset, topScale, topOffset - 1)
+            suffixLabel.Size = UDim2.fromOffset(suffixWidth, fieldHeight)
+            suffixLabel.BackgroundTransparency = 1
+            suffixLabel.BorderSizePixel = 0
+            suffixLabel.Text = suffixText
+            suffixLabel.TextColor3 = nativeValueLabel and nativeValueLabel.TextColor3 or Theme.PanelSecondary
+            suffixLabel.TextSize = nativeTextSize
+            suffixLabel.TextTransparency = nativeValueLabel and nativeValueLabel.TextTransparency or 0
+            suffixLabel.FontFace = nativeValueLabel and nativeValueLabel.FontFace or FONT_REGULAR
+            suffixLabel.TextXAlignment = Enum.TextXAlignment.Left
+            suffixLabel.TextYAlignment = nativeValueLabel and nativeValueLabel.TextYAlignment or Enum.TextYAlignment.Center
+            suffixLabel.ZIndex = box.ZIndex
+            suffixLabel.Parent = fieldParent
+        end
+
+        box.Focused:Connect(function()
+            box.BackgroundTransparency = 0.35
+            editorStroke.Transparency = 0.55
+            task.defer(function()
+                if box.Parent and box:IsFocused() and #box.Text > 0 then
+                    box.SelectionStart = 1
+                    box.CursorPosition = #box.Text + 1
+                end
+            end)
+        end)
+
+        box.FocusLost:Connect(function()
+            local typed = tonumber(string.match(box.Text or "", "^%s*([+-]?%d+%.?%d*)"))
+            if typed ~= nil then
+                local snapped = snapValue(typed)
+                if control and type(control.Set) == "function" then
+                    local ok = pcall(control.Set, snapped)
+                    if not ok then pcall(control.Set, control, snapped) end
+                end
+                currentValue = tonumber(control and control.Value) or snapped
+            end
+            box.BackgroundTransparency = 1
+            editorStroke.Transparency = 1
+            syncEditor(currentValue)
+        end)
+
+        if nativeValueLabel then
+            nativeValueLabel:GetPropertyChangedSignal("Text"):Connect(function()
+                local parsed = parseNumericPrefix(nativeValueLabel.Text)
+                if parsed ~= nil then syncEditor(parsed) end
+            end)
+        end
+        syncEditor(currentValue)
+    end)
+
+    return control
 end
 
 do
 -- ---------- Combat ----------
-local AimMain = pages.Combat:Section({ Name = "Aimbot"; Side = "Left"; Icon = "crosshair" })
-local AimTarget = pages.Combat:Section({ Name = "Targeting"; Side = "Left"; Icon = "target" })
-local AimMisc = pages.Combat:Section({ Name = "ESP"; Side = "Right"; Icon = "eye" })
-local AimExtra = pages.Combat:Section({ Name = "Silent aim & Trigger"; Side = "Right"; Icon = "layers" })
+SyllinseRuntime.AimMain = SyllinseRuntime.pages.Combat:Section({ Name = "Aimbot"; Side = "Left"; Icon = "crosshair" })
+SyllinseRuntime.AimTarget = SyllinseRuntime.pages.Combat:Section({ Name = "Targeting"; Side = "Left"; Icon = "target" })
+SyllinseRuntime.AimMisc = SyllinseRuntime.pages.Combat:Section({ Name = "ESP"; Side = "Right"; Icon = "eye" })
+SyllinseRuntime.AimExtra = SyllinseRuntime.pages.Combat:Section({ Name = "Silent aim & Trigger"; Side = "Right"; Icon = "layers" })
 
-local EnableAim = AimMain:Label({ Text = "Enable aimbot" })
-local AimbotToggleControl = addToggle(EnableAim, {
+SyllinseRuntime.EnableAim = SyllinseRuntime.AimMain:Label({ Text = "Enable aimbot" })
+SyllinseRuntime.AimbotToggleControl = SyllinseRuntime.addToggle(SyllinseRuntime.EnableAim, {
     State = false; Flag = "AimbotEnabled";
-    Callback = function(state) featureSettings.AimbotEnabled = state end;
+    Callback = function(state) SyllinseRuntime.featureSettings.AimbotEnabled = state end;
 })
-attachKeybindSetting(EnableAim, {
+SyllinseRuntime.attachKeybindSetting(SyllinseRuntime.EnableAim, {
     Key = Enum.KeyCode.RightShift; Type = "Hold"; Flag = "AimbotKey";
-    Callback = function(state) featureSettings.AimbotKeyActive = state end;
-}, "AimbotKey", AimbotToggleControl)
-EnableAim:Colorpicker({
-    Color = featureSettings.AimbotColor; Flag = "AimbotColor";
-    Callback = function(color) featureSettings.AimbotColor = color end;
+    Callback = function(state) SyllinseRuntime.featureSettings.AimbotKeyActive = state end;
+}, "AimbotKey", SyllinseRuntime.AimbotToggleControl)
+SyllinseRuntime.EnableAim:Colorpicker({
+    Color = SyllinseRuntime.featureSettings.AimbotColor; Flag = "AimbotColor";
+    Callback = function(color) SyllinseRuntime.featureSettings.AimbotColor = color end;
 })
-AimMain:Slider({
+SyllinseRuntime.addNumericSlider(SyllinseRuntime.AimMain, {
     Name = "Field of view"; Suffix = "°"; Value = 90; Min = 1; Max = 180; Increment = 1; Flag = "AimbotFOV";
-    Callback = function(value) featureSettings.AimbotFOV = value end;
+    Callback = function(value) SyllinseRuntime.featureSettings.AimbotFOV = value end;
 })
-AimMain:Slider({
+SyllinseRuntime.addNumericSlider(SyllinseRuntime.AimMain, {
     Name = "Smoothness"; Suffix = "%"; Value = 35; Min = 0; Max = 100; Increment = 1; Flag = "AimbotSmoothness";
-    Callback = function(value) featureSettings.AimbotSmoothness = value end;
+    Callback = function(value) SyllinseRuntime.featureSettings.AimbotSmoothness = value end;
 })
-AimMain:Dropdown({
+SyllinseRuntime.AimMain:Dropdown({
     Name = "Target part"; Options = { "Head", "Torso", "HumanoidRootPart", "Random" }; Value = "Head"; Flag = "AimbotTargetPart";
-    Callback = function(value) featureSettings.AimbotTargetPart = value end;
+    Callback = function(value) SyllinseRuntime.featureSettings.AimbotTargetPart = value end;
 })
-AimTarget:Dropdown({
+SyllinseRuntime.AimTarget:Dropdown({
     Name = "Priority"; Options = { "Closest", "Lowest health", "Crosshair", "Threat" }; Value = "Closest"; Flag = "AimbotPriority";
-    Callback = function(value) featureSettings.AimbotPriority = value end;
+    Callback = function(value) SyllinseRuntime.featureSettings.AimbotPriority = value end;
 })
-AimTarget:Slider({
+SyllinseRuntime.addNumericSlider(SyllinseRuntime.AimTarget, {
     Name = "Max distance"; Suffix = " studs"; Value = 400; Min = 50; Max = 2000; Increment = 25; Flag = "AimbotMaxDistance";
-    Callback = function(value) featureSettings.AimbotMaxDistance = value end;
+    Callback = function(value) SyllinseRuntime.featureSettings.AimbotMaxDistance = value end;
 })
-AimTarget:Dropdown({
+SyllinseRuntime.AimTarget:Dropdown({
     Name = "Team check"; Options = { "Off", "Friendly", "Enemy only" }; Value = "Enemy only"; Flag = "AimbotTeamCheck";
-    Callback = function(value) featureSettings.AimbotTeamCheck = value end;
+    Callback = function(value) SyllinseRuntime.featureSettings.AimbotTeamCheck = value end;
 })
-local playerNames = {}
+SyllinseRuntime.playerNames = {}
 for _, targetPlayer in ipairs(Players:GetPlayers()) do
-    if targetPlayer ~= player then table.insert(playerNames, targetPlayer.Name) end
+    if targetPlayer ~= player then table.insert(SyllinseRuntime.playerNames, targetPlayer.Name) end
 end
-local selectedPlayerOptions = playerNames
-local priorityDropdown = AimTarget:Dropdown({
-    Name = "Priority player"; Options = selectedPlayerOptions; Value = selectedPlayerOptions[1] or ""; Search = true; Flag = "PriorityPlayer";
-    Callback = function(value) featureSettings.PriorityPlayer = value end;
+SyllinseRuntime.selectedPlayerOptions = SyllinseRuntime.playerNames
+SyllinseRuntime.priorityDropdown = SyllinseRuntime.AimTarget:Dropdown({
+    Name = "Priority player"; Options = SyllinseRuntime.selectedPlayerOptions; Value = SyllinseRuntime.selectedPlayerOptions[1] or ""; Search = true; Flag = "PriorityPlayer";
+    Callback = function(value) SyllinseRuntime.featureSettings.PriorityPlayer = value end;
 })
 Players.PlayerAdded:Connect(function(targetPlayer)
-    if targetPlayer ~= player and not table.find(selectedPlayerOptions, targetPlayer.Name) then
-        table.insert(selectedPlayerOptions, targetPlayer.Name)
-        priorityDropdown.UpdateOptions(selectedPlayerOptions)
+    if targetPlayer ~= player and not table.find(SyllinseRuntime.selectedPlayerOptions, targetPlayer.Name) then
+        table.insert(SyllinseRuntime.selectedPlayerOptions, targetPlayer.Name)
+        SyllinseRuntime.priorityDropdown.UpdateOptions(SyllinseRuntime.selectedPlayerOptions)
     end
 end)
 Players.PlayerRemoving:Connect(function(targetPlayer)
-    local index = table.find(selectedPlayerOptions, targetPlayer.Name)
+    local index = table.find(SyllinseRuntime.selectedPlayerOptions, targetPlayer.Name)
     if index then
-        table.remove(selectedPlayerOptions, index)
-        priorityDropdown.UpdateOptions(selectedPlayerOptions)
+        table.remove(SyllinseRuntime.selectedPlayerOptions, index)
+        SyllinseRuntime.priorityDropdown.UpdateOptions(SyllinseRuntime.selectedPlayerOptions)
     end
 end)
 
-local EspModes = AimMisc:Label({ Text = "ESP modes" })
-addToggle(EspModes, {
+SyllinseRuntime.EspModes = SyllinseRuntime.AimMisc:Label({ Text = "ESP modes" })
+SyllinseRuntime.addToggle(SyllinseRuntime.EspModes, {
     State = true; Flag = "ESPEnabled";
-    Callback = function(state) featureSettings.ESPEnabled = state end;
+    Callback = function(state) SyllinseRuntime.featureSettings.ESPEnabled = state end;
 })
-AimMisc:Dropdown({
+SyllinseRuntime.AimMisc:Dropdown({
     Name = "ESP elements"; Multi = true; Options = { "Box", "Name", "Health", "Distance", "Tracer" };
     Value = { "Box", "Name" }; Flag = "ESPModes";
-    Callback = function(value) featureSettings.ESPModes = table.clone(value) end;
+    Callback = function(value) SyllinseRuntime.featureSettings.ESPModes = table.clone(value) end;
 })
-AimMisc:Slider({
+SyllinseRuntime.addNumericSlider(SyllinseRuntime.AimMisc, {
     Name = "ESP range"; Suffix = " studs"; Value = 500; Min = 50; Max = 3000; Increment = 50; Flag = "ESPRange";
-    Callback = function(value) featureSettings.ESPRange = value end;
+    Callback = function(value) SyllinseRuntime.featureSettings.ESPRange = value end;
 })
-AimMisc:Label({ Text = "ESP color" }):Colorpicker({
-    Color = featureSettings.ESPColor; Flag = "ESPColor";
-    Callback = function(color) featureSettings.ESPColor = color end;
+SyllinseRuntime.AimMisc:Label({ Text = "ESP color" }):Colorpicker({
+    Color = SyllinseRuntime.featureSettings.ESPColor; Flag = "ESPColor";
+    Callback = function(color) SyllinseRuntime.featureSettings.ESPColor = color end;
 })
-local Silent = AimExtra:Label({ Text = "Silent aim" })
-local SilentAimToggleControl = addToggle(Silent, {
+SyllinseRuntime.Silent = SyllinseRuntime.AimExtra:Label({ Text = "Silent aim" })
+SyllinseRuntime.SilentAimToggleControl = SyllinseRuntime.addToggle(SyllinseRuntime.Silent, {
     State = false; Flag = "SilentAim";
-    Callback = function(state) featureSettings.SilentAim = state end;
+    Callback = function(state) SyllinseRuntime.featureSettings.SilentAim = state end;
 })
-attachKeybindSetting(Silent, {
+SyllinseRuntime.attachKeybindSetting(SyllinseRuntime.Silent, {
     Key = Enum.KeyCode.E; Type = "Toggle"; Flag = "SilentAimKey";
-    Callback = function(state) featureSettings.SilentKeyActive = state end;
-}, "SilentAimKey", SilentAimToggleControl)
-AimExtra:Slider({
+    Callback = function(state) SyllinseRuntime.featureSettings.SilentKeyActive = state end;
+}, "SilentAimKey", SyllinseRuntime.SilentAimToggleControl)
+SyllinseRuntime.addNumericSlider(SyllinseRuntime.AimExtra, {
     Name = "Hit chance"; Suffix = "%"; Value = 100; Min = 1; Max = 100; Increment = 1; Flag = "HitChance";
-    Callback = function(value) featureSettings.HitChance = value end;
+    Callback = function(value) SyllinseRuntime.featureSettings.HitChance = value end;
 })
-AimExtra:Dropdown({
+SyllinseRuntime.AimExtra:Dropdown({
     Name = "Prediction"; Options = { "None", "Linear", "Velocity" }; Value = "Linear"; Flag = "Prediction";
-    Callback = function(value) featureSettings.Prediction = value end;
+    Callback = function(value) SyllinseRuntime.featureSettings.Prediction = value end;
 })
-local Trigger = AimExtra:Label({ Text = "Triggerbot" })
-local TriggerToggleControl = addToggle(Trigger, {
+SyllinseRuntime.Trigger = SyllinseRuntime.AimExtra:Label({ Text = "Triggerbot" })
+SyllinseRuntime.TriggerToggleControl = SyllinseRuntime.addToggle(SyllinseRuntime.Trigger, {
     State = false; Flag = "TriggerEnabled";
-    Callback = function(state) featureSettings.TriggerEnabled = state end;
+    Callback = function(state) SyllinseRuntime.featureSettings.TriggerEnabled = state end;
 })
-attachKeybindSetting(Trigger, {
+SyllinseRuntime.attachKeybindSetting(SyllinseRuntime.Trigger, {
     Key = Enum.UserInputType.MouseButton2; Type = "Hold"; Flag = "TriggerKey";
-    Callback = function(state) featureSettings.TriggerKeyActive = state end;
-}, "TriggerKey", TriggerToggleControl)
+    Callback = function(state) SyllinseRuntime.featureSettings.TriggerKeyActive = state end;
+}, "TriggerKey", SyllinseRuntime.TriggerToggleControl)
 
 end
 
 do
 -- ---------- Desync ----------
-local AAMain = pages.Desync:Section({ Name = "Anti-aim"; Side = "Left"; Icon = "move" })
-local AAExtra = pages.Desync:Section({ Name = "Desync"; Side = "Right"; Icon = "activity" })
-local AAEnable = AAMain:Label({ Text = "Enable anti-aim" })
-local AntiAimToggleControl = addToggle(AAEnable, {
+SyllinseRuntime.AAMain = SyllinseRuntime.pages.Desync:Section({ Name = "Anti-aim"; Side = "Left"; Icon = "move" })
+SyllinseRuntime.AAExtra = SyllinseRuntime.pages.Desync:Section({ Name = "Desync"; Side = "Right"; Icon = "activity" })
+SyllinseRuntime.AAEnable = SyllinseRuntime.AAMain:Label({ Text = "Enable anti-aim" })
+SyllinseRuntime.AntiAimToggleControl = SyllinseRuntime.addToggle(SyllinseRuntime.AAEnable, {
     State = false; Flag = "AAEnabled";
-    Callback = function(state) featureSettings.AAEnabled = state end;
+    Callback = function(state) SyllinseRuntime.featureSettings.AAEnabled = state end;
 })
-attachKeybindSetting(AAEnable, {
+SyllinseRuntime.attachKeybindSetting(SyllinseRuntime.AAEnable, {
     Key = Enum.KeyCode.X; Type = "Toggle"; Flag = "AAKey";
-    Callback = function(state) featureSettings.AAKeyActive = state end;
-}, "AAKey", AntiAimToggleControl)
-AAMain:Dropdown({
+    Callback = function(state) SyllinseRuntime.featureSettings.AAKeyActive = state end;
+}, "AAKey", SyllinseRuntime.AntiAimToggleControl)
+SyllinseRuntime.AAMain:Dropdown({
     Name = "Yaw mode"; Options = { "Static", "Jitter", "Spin", "Random" }; Value = "Jitter"; Flag = "AAYaw";
-    Callback = function(value) featureSettings.AAYaw = value end;
+    Callback = function(value) SyllinseRuntime.featureSettings.AAYaw = value end;
 })
-AAMain:Slider({
+SyllinseRuntime.addNumericSlider(SyllinseRuntime.AAMain, {
     Name = "Jitter range"; Suffix = "°"; Value = 45; Min = 0; Max = 180; Increment = 5; Flag = "AAJitterRange";
-    Callback = function(value) featureSettings.AAJitterRange = value end;
+    Callback = function(value) SyllinseRuntime.featureSettings.AAJitterRange = value end;
 })
-local DesyncToggle = AAExtra:Label({ Text = "Enable desync preview setting" })
-addToggle(DesyncToggle, {
+SyllinseRuntime.DesyncToggle = SyllinseRuntime.AAExtra:Label({ Text = "Enable desync preview setting" })
+SyllinseRuntime.addToggle(SyllinseRuntime.DesyncToggle, {
     State = false; Flag = "DesyncEnabled";
-    Callback = function(state) featureSettings.DesyncEnabled = state end;
+    Callback = function(state) SyllinseRuntime.featureSettings.DesyncEnabled = state end;
 })
-AAExtra:Slider({
+SyllinseRuntime.addNumericSlider(SyllinseRuntime.AAExtra, {
     Name = "Desync amount"; Suffix = "%"; Value = 50; Min = 0; Max = 100; Increment = 1; Flag = "DesyncAmount";
-    Callback = function(value) featureSettings.DesyncAmount = value end;
+    Callback = function(value) SyllinseRuntime.featureSettings.DesyncAmount = value end;
 })
-AAExtra:Dropdown({
+SyllinseRuntime.AAExtra:Dropdown({
     Name = "Desync mode"; Options = { "Stable", "Smooth", "Responsive" }; Value = "Stable"; Flag = "DesyncMode";
-    Callback = function(value) featureSettings.DesyncMode = value end;
+    Callback = function(value) SyllinseRuntime.featureSettings.DesyncMode = value end;
 })
-AAExtra:Paragraph({ Title = "Control status"; Body = "Lumen's native settings are wired. Connect your own approved in-experience logic to SyllinseFeatureSettings when you need a setting to drive a feature." })
-AAExtra:Button({
+SyllinseRuntime.AAExtra:Paragraph({ Title = "Control status"; Body = "Lumen's native settings are wired. Connect your own approved in-experience logic to SyllinseFeatureSettings when you need a setting to drive a feature." })
+SyllinseRuntime.AAExtra:Button({
     Name = "Test notification";
-    Callback = function() notify("Desync", "Lumen's native notification is working.", "Success") end;
+    Callback = function() SyllinseRuntime.notify("Desync", "Lumen's native notification is working.", "Success") end;
 })
 
 end
 
 do
 -- ---------- Visuals ----------
-local VisualPlayers = pages.Visuals:Section({ Name = "Players"; Side = "Left"; Icon = "users" })
-local VisualExtras = pages.Visuals:Section({ Name = "Display"; Side = "Right"; Icon = "eye" })
-local function visualToggle(parent, name, flag, setting, default)
+SyllinseRuntime.VisualPlayers = SyllinseRuntime.pages.Visuals:Section({ Name = "Players"; Side = "Left"; Icon = "users" })
+SyllinseRuntime.VisualExtras = SyllinseRuntime.pages.Visuals:Section({ Name = "Display"; Side = "Right"; Icon = "eye" })
+SyllinseRuntime.visualToggle = function(parent, name, flag, setting, default)
     local label = parent:Label({ Text = name })
-    addToggle(label, {
+    SyllinseRuntime.addToggle(label, {
         State = default; Flag = flag;
-        Callback = function(state) featureSettings[setting] = state end;
+        Callback = function(state) SyllinseRuntime.featureSettings[setting] = state end;
     })
 end
-visualToggle(VisualPlayers, "Box ESP", "BoxESP", "BoxESP", true)
-visualToggle(VisualPlayers, "Name ESP", "NameESP", "NameESP", true)
-visualToggle(VisualPlayers, "Health ESP", "HealthESP", "HealthESP", true)
-visualToggle(VisualPlayers, "Distance ESP", "DistanceESP", "DistanceESP", false)
-visualToggle(VisualPlayers, "Tracer ESP", "TracerESP", "TracerESP", false)
-VisualExtras:Slider({
+SyllinseRuntime.visualToggle(SyllinseRuntime.VisualPlayers, "Box ESP", "BoxESP", "BoxESP", true)
+SyllinseRuntime.visualToggle(SyllinseRuntime.VisualPlayers, "Name ESP", "NameESP", "NameESP", true)
+SyllinseRuntime.visualToggle(SyllinseRuntime.VisualPlayers, "Health ESP", "HealthESP", "HealthESP", true)
+SyllinseRuntime.visualToggle(SyllinseRuntime.VisualPlayers, "Distance ESP", "DistanceESP", "DistanceESP", false)
+SyllinseRuntime.visualToggle(SyllinseRuntime.VisualPlayers, "Tracer ESP", "TracerESP", "TracerESP", false)
+SyllinseRuntime.addNumericSlider(SyllinseRuntime.VisualExtras, {
     Name = "Max display range"; Suffix = " studs"; Value = 500; Min = 50; Max = 3000; Increment = 50; Flag = "VisualRange";
-    Callback = function(value) featureSettings.VisualRange = value end;
+    Callback = function(value) SyllinseRuntime.featureSettings.VisualRange = value end;
 })
-VisualExtras:Slider({
+SyllinseRuntime.addNumericSlider(SyllinseRuntime.VisualExtras, {
     Name = "Opacity"; Suffix = "%"; Value = 85; Min = 0; Max = 100; Increment = 1; Flag = "VisualOpacity";
-    Callback = function(value) featureSettings.VisualOpacity = value end;
+    Callback = function(value) SyllinseRuntime.featureSettings.VisualOpacity = value end;
 })
-VisualExtras:Label({ Text = "Highlight color" }):Colorpicker({
-    Color = featureSettings.VisualColor; Flag = "VisualColor";
-    Callback = function(color) featureSettings.VisualColor = color end;
+SyllinseRuntime.VisualExtras:Label({ Text = "Highlight color" }):Colorpicker({
+    Color = SyllinseRuntime.featureSettings.VisualColor; Flag = "VisualColor";
+    Callback = function(color) SyllinseRuntime.featureSettings.VisualColor = color end;
 })
-VisualExtras:Paragraph({ Title = "Appearance"; Body = "The color, opacity and range controls use Lumen widgets and callbacks. Their values are kept in SyllinseFeatureSettings." })
+SyllinseRuntime.VisualExtras:Paragraph({ Title = "Appearance"; Body = "The color, opacity and range controls use Lumen widgets and callbacks. Their values are kept in SyllinseFeatureSettings." })
 
 end
 
 do
 -- ---------- Configs ----------
-local ConfigList = pages.Configs:Section({ Name = "Config manager"; Side = "Left"; Icon = "folder" })
-local ConfigActions = pages.Configs:Section({ Name = "Actions"; Side = "Right"; Icon = "save" })
-ConfigList:Paragraph({
+SyllinseRuntime.ConfigList = SyllinseRuntime.pages.Configs:Section({ Name = "Config manager"; Side = "Left"; Icon = "folder" })
+SyllinseRuntime.ConfigActions = SyllinseRuntime.pages.Configs:Section({ Name = "Actions"; Side = "Right"; Icon = "save" })
+SyllinseRuntime.ConfigList:Paragraph({
     Title = "Lumen config storage";
     Body = "Configs use Lumen's native flag serialization. File save/load requires the file APIs available in your client environment.";
 })
-local configNameInput = ConfigList:Input({
+SyllinseRuntime.configNameInput = SyllinseRuntime.ConfigList:Input({
     Name = "Config name"; Value = "Syllinse"; Placeholder = "Type a config name";
     Callback = function() end;
 })
-local function cleanConfigNames(values)
+SyllinseRuntime.cleanConfigNames = function(values)
     local clean = {}
     if type(values) == "table" then
         for _, name in ipairs(values) do
@@ -3542,38 +4318,38 @@ local function cleanConfigNames(values)
     return clean
 end
 
-local configNames = cleanConfigNames(Lumen.ListConfigs())
-local selectedConfig = ConfigList:Dropdown({
-    Name = "Saved configs"; Options = configNames; Value = configNames[1] or ""; Search = true;
+SyllinseRuntime.configNames = SyllinseRuntime.cleanConfigNames(Lumen.ListConfigs())
+SyllinseRuntime.selectedConfig = SyllinseRuntime.ConfigList:Dropdown({
+    Name = "Saved configs"; Options = SyllinseRuntime.configNames; Value = SyllinseRuntime.configNames[1] or ""; Search = true;
     Callback = function(value)
-        if type(value) == "string" and value ~= "" then configNameInput.Set(value) end
+        if type(value) == "string" and value ~= "" then SyllinseRuntime.configNameInput.Set(value) end
     end;
 })
-local function refreshConfigs(preferredName, silent)
+SyllinseRuntime.refreshConfigs = function(preferredName, silent)
     local ok, options = pcall(function() return Lumen.ListConfigs() end)
     if not ok or type(options) ~= "table" then
-        notify("Configs", "Could not list config files in this environment.", "Warning")
+        SyllinseRuntime.notify("Configs", "Could not list config files in this environment.", "Warning")
         return false
     end
-    configNames = cleanConfigNames(options)
-    selectedConfig.UpdateOptions(configNames)
-    if type(preferredName) == "string" and table.find(configNames, preferredName) then
-        selectedConfig.Set(preferredName)
-    elseif #configNames == 0 then
-        selectedConfig.Set("")
+    SyllinseRuntime.configNames = SyllinseRuntime.cleanConfigNames(options)
+    SyllinseRuntime.selectedConfig.UpdateOptions(SyllinseRuntime.configNames)
+    if type(preferredName) == "string" and table.find(SyllinseRuntime.configNames, preferredName) then
+        SyllinseRuntime.selectedConfig.Set(preferredName)
+    elseif #SyllinseRuntime.configNames == 0 then
+        SyllinseRuntime.selectedConfig.Set("")
     end
-    if not silent then notify("Configs", "Config list refreshed.", "Info", 1.5) end
+    if not silent then SyllinseRuntime.notify("Configs", "Config list refreshed.", "Info", 1.5) end
     return true
 end
 
-local function getSelectedConfigName()
-    local value = selectedConfig.Value
-    if type(value) == "string" and value ~= "" and table.find(configNames, value) then
+SyllinseRuntime.getSelectedConfigName = function()
+    local value = SyllinseRuntime.selectedConfig.Value
+    if type(value) == "string" and value ~= "" and table.find(SyllinseRuntime.configNames, value) then
         return value
     end
     -- Some clients expose read/write APIs but not listfiles; typed names remain usable there.
-    if #configNames == 0 then
-        local typed = configNameInput.Value
+    if #SyllinseRuntime.configNames == 0 then
+        local typed = SyllinseRuntime.configNameInput.Value
         if type(typed) == "string" then
             typed = typed:match("^%s*(.-)%s*$")
             if typed ~= "" then return typed end
@@ -3581,11 +4357,11 @@ local function getSelectedConfigName()
     end
     return ""
 end
-ConfigActions:Paragraph({
+SyllinseRuntime.ConfigActions:Paragraph({
     Title = "Profile actions";
     Body = "Save or load all Lumen flags, including the control values in Combat, Desync, Visuals and Settings.";
 })
-ConfigActions:Label({
+SyllinseRuntime.ConfigActions:Label({
     Text = "Autoload config: checking...";
     Color = Theme.PanelText;
 })
@@ -3593,7 +4369,7 @@ ConfigActions:Label({
 -- Lumen label rows are builder objects and do not expose a :Set() method.
 -- Update the actual rendered TextLabel instead, so this status row cannot abort
 -- the remaining UI construction if the library's wrapper API changes.
-local function setAutoloadStatusText(text)
+SyllinseRuntime.setAutoloadStatusText = function(text)
     local hosts = lumenHosts.Configs
     if not hosts then return false end
     for _, column in pairs(hosts) do
@@ -3609,97 +4385,97 @@ local function setAutoloadStatusText(text)
     end
     return false
 end
-ConfigActions:Button({
+SyllinseRuntime.ConfigActions:Button({
     Name = "Save config";
     Callback = function()
-        local name = tostring(configNameInput.Value or ""):match("^%s*(.-)%s*$")
-        if name == "" then notify("Configs", "Enter a config name first.", "Warning"); return end
+        local name = tostring(SyllinseRuntime.configNameInput.Value or ""):match("^%s*(.-)%s*$")
+        if name == "" then SyllinseRuntime.notify("Configs", "Enter a config name first.", "Warning"); return end
         local ok, saved = pcall(function() return Lumen.SaveConfig(name) end)
         if ok and saved then
-            refreshConfigs(name, true)
-            notify("Configs", "Saved '" .. name .. "'.", "Success")
+            SyllinseRuntime.refreshConfigs(name, true)
+            SyllinseRuntime.notify("Configs", "Saved '" .. name .. "'.", "Success")
         else
-            notify("Configs", "Save failed. Check file API support.", "Error")
+            SyllinseRuntime.notify("Configs", "Save failed. Check file API support.", "Error")
         end
     end;
 })
-ConfigActions:Button({
+SyllinseRuntime.ConfigActions:Button({
     Name = "Load selected config";
     Callback = function()
-        local name = getSelectedConfigName()
-        if name == "" then notify("Configs", "Choose a saved config first.", "Warning"); return end
+        local name = SyllinseRuntime.getSelectedConfigName()
+        if name == "" then SyllinseRuntime.notify("Configs", "Choose a saved config first.", "Warning"); return end
         local ok, loaded = pcall(function() return Lumen.LoadConfig(name) end)
-        if ok and loaded then notify("Configs", "Loaded '" .. name .. "'.", "Success")
-        else notify("Configs", "Load failed or the file does not exist.", "Error") end
+        if ok and loaded then SyllinseRuntime.notify("Configs", "Loaded '" .. name .. "'.", "Success")
+        else SyllinseRuntime.notify("Configs", "Load failed or the file does not exist.", "Error") end
     end;
 })
-ConfigActions:Button({
+SyllinseRuntime.ConfigActions:Button({
     Name = "Delete selected config";
     Callback = function()
-        local name = getSelectedConfigName()
-        if name == "" then notify("Configs", "Choose a saved config first.", "Warning"); return end
+        local name = SyllinseRuntime.getSelectedConfigName()
+        if name == "" then SyllinseRuntime.notify("Configs", "Choose a saved config first.", "Warning"); return end
         local ok, deleted = pcall(function() return Lumen.DeleteConfig(name) end)
-        if ok and deleted then refreshConfigs(nil, true); notify("Configs", "Deleted '" .. name .. "'.", "Success")
-        else notify("Configs", "Delete failed or the file does not exist.", "Error") end
+        if ok and deleted then SyllinseRuntime.refreshConfigs(nil, true); SyllinseRuntime.notify("Configs", "Deleted '" .. name .. "'.", "Success")
+        else SyllinseRuntime.notify("Configs", "Delete failed or the file does not exist.", "Error") end
     end;
 })
-ConfigActions:Button({ Name = "Refresh config list"; Callback = refreshConfigs; })
+SyllinseRuntime.ConfigActions:Button({ Name = "Refresh config list"; Callback = SyllinseRuntime.refreshConfigs; })
 
 -- The selected config name is stored separately so it can be loaded on the next launch.
-local AUTOLOAD_FILE = "Syllinse_Autoload.txt"
+SyllinseRuntime.AUTOLOAD_FILE = "Syllinse_Autoload.txt"
 getAutoloadName = function()
     if type(isfile) ~= "function" or type(readfile) ~= "function" then return nil end
-    local okExists, exists = pcall(isfile, AUTOLOAD_FILE)
+    local okExists, exists = pcall(isfile, SyllinseRuntime.AUTOLOAD_FILE)
     if not okExists or not exists then return nil end
-    local okRead, value = pcall(readfile, AUTOLOAD_FILE)
+    local okRead, value = pcall(readfile, SyllinseRuntime.AUTOLOAD_FILE)
     if okRead and type(value) == "string" then
         value = value:match("^%s*(.-)%s*$")
         if value ~= "" then return value end
     end
     return nil
 end
-local function refreshAutoloadStatus()
+SyllinseRuntime.refreshAutoloadStatus = function()
     local name = getAutoloadName()
     local text = name and ("Autoload config: " .. name) or "Autoload config: None"
     -- Never let a cosmetic status refresh break the UI startup flow.
-    local ok, updated = pcall(setAutoloadStatusText, text)
+    local ok, updated = pcall(SyllinseRuntime.setAutoloadStatusText, text)
     if not ok or not updated then
         warn("[Syllinse] Could not refresh the autoload status label")
     end
 end
-refreshAutoloadStatus()
-ConfigActions:Button({
+SyllinseRuntime.refreshAutoloadStatus()
+SyllinseRuntime.ConfigActions:Button({
     Name = "Set selected as autoload";
     Callback = function()
-        local name = getSelectedConfigName()
-        if name == "" then notify("Configs", "Choose or enter a saved config first.", "Warning"); return end
+        local name = SyllinseRuntime.getSelectedConfigName()
+        if name == "" then SyllinseRuntime.notify("Configs", "Choose or enter a saved config first.", "Warning"); return end
         if type(writefile) ~= "function" then
-            notify("Configs", "Autoload requires file-write support in this client.", "Warning")
+            SyllinseRuntime.notify("Configs", "Autoload requires file-write support in this client.", "Warning")
             return
         end
-        local ok = pcall(writefile, AUTOLOAD_FILE, name)
+        local ok = pcall(writefile, SyllinseRuntime.AUTOLOAD_FILE, name)
         if ok then
-            refreshAutoloadStatus()
-            notify("Configs", "'" .. name .. "' will load on startup.", "Success")
+            SyllinseRuntime.refreshAutoloadStatus()
+            SyllinseRuntime.notify("Configs", "'" .. name .. "' will load on startup.", "Success")
         else
-            notify("Configs", "Could not save the autoload selection.", "Error")
+            SyllinseRuntime.notify("Configs", "Could not save the autoload selection.", "Error")
         end
     end;
 })
-ConfigActions:Button({
+SyllinseRuntime.ConfigActions:Button({
     Name = "Clear autoload";
     Callback = function()
         if type(delfile) ~= "function" or type(isfile) ~= "function" then
-            notify("Configs", "Clearing autoload requires file-delete support.", "Warning")
+            SyllinseRuntime.notify("Configs", "Clearing autoload requires file-delete support.", "Warning")
             return
         end
         local ok = pcall(function()
-            if isfile(AUTOLOAD_FILE) then delfile(AUTOLOAD_FILE) end
+            if isfile(SyllinseRuntime.AUTOLOAD_FILE) then delfile(SyllinseRuntime.AUTOLOAD_FILE) end
         end)
         if ok then
-            refreshAutoloadStatus()
-            notify("Configs", "Autoload cleared.", "Info")
-        else notify("Configs", "Could not clear autoload.", "Error") end
+            SyllinseRuntime.refreshAutoloadStatus()
+            SyllinseRuntime.notify("Configs", "Autoload cleared.", "Info")
+        else SyllinseRuntime.notify("Configs", "Could not clear autoload.", "Error") end
     end;
 })
 
@@ -3707,59 +4483,136 @@ end
 
 do
 -- ---------- Misc ----------
-local Movement = pages.Misc:Section({ Name = "Movement"; Side = "Left"; Icon = "move" })
-local Utility = pages.Misc:Section({ Name = "Utilities"; Side = "Right"; Icon = "wrench" })
-local Fly = Movement:Label({ Text = "Fly" })
-local FlyToggleControl = addToggle(Fly, {
+SyllinseRuntime.Movement = SyllinseRuntime.pages.Misc:Section({ Name = "Movement"; Side = "Left"; Icon = "move" })
+SyllinseRuntime.Utility = SyllinseRuntime.pages.Misc:Section({ Name = "Utilities"; Side = "Right"; Icon = "wrench" })
+SyllinseRuntime.Fly = SyllinseRuntime.Movement:Label({ Text = "Fly" })
+SyllinseRuntime.FlyToggleControl = SyllinseRuntime.addToggle(SyllinseRuntime.Fly, {
     State = false; Flag = "Fly";
-    Callback = function(state) featureSettings.Fly = state end;
+    Callback = function(state) SyllinseRuntime.featureSettings.Fly = state end;
 })
-attachKeybindSetting(Fly, {
+SyllinseRuntime.attachKeybindSetting(SyllinseRuntime.Fly, {
     Key = Enum.KeyCode.F; Type = "Toggle"; Flag = "FlyKey";
-    Callback = function(state) featureSettings.FlyKeyActive = state end;
-}, "FlyKey", FlyToggleControl)
-Movement:Slider({
+    Callback = function(state) SyllinseRuntime.featureSettings.FlyKeyActive = state end;
+}, "FlyKey", SyllinseRuntime.FlyToggleControl)
+SyllinseRuntime.addNumericSlider(SyllinseRuntime.Movement, {
     Name = "Fly speed"; Suffix = " studs/s"; Value = 60; Min = 10; Max = 250; Increment = 5; Flag = "FlySpeed";
-    Callback = function(value) featureSettings.FlySpeed = value end;
+    Callback = function(value) SyllinseRuntime.featureSettings.FlySpeed = value end;
 })
-Movement:Slider({
+SyllinseRuntime.addNumericSlider(SyllinseRuntime.Movement, {
     Name = "Walk speed setting"; Value = 16; Min = 8; Max = 100; Increment = 1; Flag = "WalkSpeed";
-    Callback = function(value) featureSettings.WalkSpeed = value end;
+    Callback = function(value) SyllinseRuntime.featureSettings.WalkSpeed = value end;
 })
-Movement:Slider({
+SyllinseRuntime.addNumericSlider(SyllinseRuntime.Movement, {
     Name = "Jump power setting"; Value = 50; Min = 25; Max = 150; Increment = 5; Flag = "JumpPower";
-    Callback = function(value) featureSettings.JumpPower = value end;
+    Callback = function(value) SyllinseRuntime.featureSettings.JumpPower = value end;
 })
-Utility:Paragraph({
+SyllinseRuntime.Utility:Paragraph({
     Title = "Session";
     Body = "Quick UI actions and status notifications. Feature controls only update their settings table until you connect your feature logic.";
 })
-Utility:Button({ Name = "Test notification"; Callback = function() notify("Syllinse", "Lumen controls and callbacks are connected.", "Success") end; })
-Utility:Button({ Name = "Reset UI search"; Callback = function() searchBox.Text = ""; notify("Syllinse", "Search cleared.", "Info", 1.5) end; })
+SyllinseRuntime.Utility:Button({ Name = "Test notification"; Callback = function() SyllinseRuntime.notify("Syllinse", "Lumen controls and callbacks are connected.", "Success") end; })
+SyllinseRuntime.Utility:Button({ Name = "Reset UI search"; Callback = function() searchBox.Text = ""; SyllinseRuntime.notify("Syllinse", "Search cleared.", "Info", 1.5) end; })
 
 end
 
 -- ---------- Settings ----------
-local settingsLeft = pages.Settings:Section({ Name = "Interface"; Side = "Left"; Icon = "settings" })
-local settingsRight = pages.Settings:Section({ Name = "Appearance"; Side = "Right"; Icon = "palette" })
-local launcherButtonLabel = settingsLeft:Label({ Text = "Open Button" })
-addToggle(launcherButtonLabel, {
+SyllinseRuntime.settingsLeft = SyllinseRuntime.pages.Settings:Section({ Name = "Interface"; Side = "Left"; Icon = "settings" })
+SyllinseRuntime.settingsRight = SyllinseRuntime.pages.Settings:Section({ Name = "Appearance"; Side = "Right"; Icon = "palette" })
+SyllinseRuntime.settingsButton = SyllinseRuntime.pages.Settings:Section({ Name = "Open/Close Button"; Side = "Right"; Icon = "" })
+-- This panel intentionally has no header icon or empty icon slot. Keep the title aligned
+-- to the normal left padding instead of reserving space for a missing image.
+do
+    local buttonSectionHeader = SyllinseRuntime.settingsButton.Frame and SyllinseRuntime.settingsButton.Frame:FindFirstChild("Header")
+    if buttonSectionHeader then
+        local buttonSectionIcon = buttonSectionHeader:FindFirstChild("Icon")
+        if buttonSectionIcon and buttonSectionIcon:IsA("ImageLabel") then
+            buttonSectionIcon.Image = ""
+            buttonSectionIcon.Size = UDim2.fromOffset(0, 0)
+            buttonSectionIcon.Visible = false
+        end
+        local buttonSectionLayout = buttonSectionHeader:FindFirstChildOfClass("UIListLayout")
+        if buttonSectionLayout then
+            buttonSectionLayout.Padding = UDim.new(0, 0)
+        end
+    end
+end
+
+SyllinseRuntime.settingsLeft:Paragraph({
+    Title = "Automatic Window Size";
+    Body = "The window adapts to your screen. Use this slider to fine-tune the overall UI size.";
+})
+SyllinseRuntime.addNumericSlider(SyllinseRuntime.settingsLeft, {
+    Name = "UI scale";
+    Suffix = "%";
+    Value = windowSizePercent;
+    Min = 70;
+    Max = 100;
+    Increment = 1;
+    Flag = "SyllinseWindowScale";
+    Callback = function(value)
+        windowSizePercent = math.clamp(tonumber(value) or windowSizePercent, 70, 100)
+        windowSizeMultiplier = windowSizePercent / 100
+        updateScale()
+        -- Existing Lumen popups are rendered in a separate ScreenGui, so refresh
+        -- their UIScale immediately when the window-size slider changes.
+        for _, layer in ipairs({ Lumen._Instance, Lumen._Overlay }) do
+            if layer then
+                for _, child in ipairs(layer:GetChildren()) do
+                    syncDropdownPopupScale(child)
+                end
+            end
+        end
+    end;
+})
+
+SyllinseRuntime.settingsLeft:Button({
+    Name = "Reset UI Position";
+    Callback = function()
+        -- Clear the custom-position flag; updateScale then restores the correct centered
+        -- position for the current PC/mobile viewport and reapplies automatic fitting.
+        windowHasCustomPosition = false
+        updateScale()
+        windowTransitionTweens.TargetPosition = root.Position
+        SyllinseRuntime.notify("Syllinse", "Window position reset to center.", "Success", 1.5)
+    end;
+})
+
+-- Launcher controls are grouped into their own panel to keep button-specific
+-- options together instead of mixing them into general Interface settings.
+SyllinseRuntime.launcherButtonLabel = SyllinseRuntime.settingsButton:Label({ Text = "Open Button" })
+SyllinseRuntime.addToggle(SyllinseRuntime.launcherButtonLabel, {
     State = showLauncherButton,
     Flag = "SyllinseLauncherButton",
     Callback = function(state)
         showLauncherButton = state == true
-        featureSettings.ShowLauncherButton = showLauncherButton
+        SyllinseRuntime.featureSettings.ShowLauncherButton = showLauncherButton
         refreshLauncherVisibility()
     end,
 })
+SyllinseRuntime.settingsButton:Paragraph({
+    Title = "Button Transparency";
+    Body = "Set to 0% to hide the button visuals for clean mobile recording. The invisible hit area remains usable.";
+})
+SyllinseRuntime.addNumericSlider(SyllinseRuntime.settingsButton, {
+    Name = "Button Opacity";
+    Suffix = "%";
+    Value = 100;
+    Min = 0;
+    Max = 100;
+    Increment = 1;
+    Flag = "SyllinseLauncherOpacity";
+    Callback = function(value)
+        SyllinseRuntime.featureSettings.ApplyLauncherOpacity(value)
+    end;
+})
 
-local terminologyLabelSetting = settingsLeft:Label({ Text = "Show Menu Function Terminology" })
-addToggle(terminologyLabelSetting, {
+SyllinseRuntime.terminologyLabelSetting = SyllinseRuntime.settingsLeft:Label({ Text = "Show Menu Function Terminology" })
+SyllinseRuntime.addToggle(SyllinseRuntime.terminologyLabelSetting, {
     State = showMenuFunctionTerminology,
     Flag = "SyllinseMenuFunctionTerminology",
     Callback = function(state)
         showMenuFunctionTerminology = state == true
-        featureSettings.ShowMenuFunctionTerminology = showMenuFunctionTerminology
+        SyllinseRuntime.featureSettings.ShowMenuFunctionTerminology = showMenuFunctionTerminology
         for _, nav in ipairs(navButtons) do
             local label = terminologyLabels[nav.Name]
             -- Keep the tab buttons' original position and hitbox in both modes.
@@ -3792,22 +4645,22 @@ addToggle(terminologyLabelSetting, {
     end,
 })
 
-local notificationLabel = settingsLeft:Label({ Text = "Notifications" })
-local notificationControl = addToggle(notificationLabel, {
+SyllinseRuntime.notificationLabel = SyllinseRuntime.settingsLeft:Label({ Text = "Notifications" })
+SyllinseRuntime.notificationControl = SyllinseRuntime.addToggle(SyllinseRuntime.notificationLabel, {
     State = true; Flag = "Notifications";
     Callback = function(state)
-        featureSettings.Notifications = state
+        SyllinseRuntime.featureSettings.Notifications = state
         -- Syllinse owns toast rendering; keep Lumen's colored native renderer disabled.
         Lumen.NotifyToggles = false
     end;
 })
 
-local footerBarLabel = settingsLeft:Label({ Text = "Footer bar" })
-addToggle(footerBarLabel, {
+SyllinseRuntime.footerBarLabel = SyllinseRuntime.settingsLeft:Label({ Text = "Footer bar" })
+SyllinseRuntime.addToggle(SyllinseRuntime.footerBarLabel, {
     State = true; Flag = "FooterBar";
     Callback = function(state)
         local enabled = state == true
-        featureSettings.FooterBar = enabled
+        SyllinseRuntime.featureSettings.FooterBar = enabled
         footerBar.Visible = enabled
 
         -- Reflow from the current viewport; do not force desktop-size rows on phones.
@@ -3815,94 +4668,99 @@ addToggle(footerBarLabel, {
     end;
 })
 
-settingsLeft:Dropdown({
+SyllinseRuntime.settingsLeft:Dropdown({
     Name = "Notification position";
     Options = { "Top Left", "Top Right", "Bottom Left", "Bottom Right" };
     Value = Lumen.NotifyPosition or "Top Right";
     Search = false;
     Flag = "SyllinseNotificationPosition";
     Callback = function(position)
-        applyNotificationPosition(position)
+        SyllinseRuntime.applyNotificationPosition(position)
     end;
 })
-local watermarkLabel = settingsLeft:Label({ Text = "Watermark" })
-addToggle(watermarkLabel, {
+SyllinseRuntime.watermarkLabel = SyllinseRuntime.settingsLeft:Label({ Text = "Watermark" })
+SyllinseRuntime.addToggle(SyllinseRuntime.watermarkLabel, {
     State = false; Flag = "Watermark";
     Callback = function(state)
-        featureSettings.Watermark = state
+        SyllinseRuntime.featureSettings.Watermark = state
         Lumen.SetWatermark("Syllinse Project", state)
     end;
 })
-local keybindListLabel = settingsLeft:Label({ Text = "Keybind list" })
-addToggle(keybindListLabel, {
+SyllinseRuntime.keybindListLabel = SyllinseRuntime.settingsLeft:Label({ Text = "Keybind list" })
+SyllinseRuntime.addToggle(SyllinseRuntime.keybindListLabel, {
     State = false; Flag = "KeybindList";
     Callback = function(state)
-        featureSettings.KeybindList = state
+        SyllinseRuntime.featureSettings.KeybindList = state
         Lumen.SetKeybindList(state)
     end;
 })
 
 if touchInputEnabled then
-    local mobileActionLabel = settingsLeft:Label({ Text = "Mobile action buttons" })
-    addToggle(mobileActionLabel, {
+    local mobileActionLabel = SyllinseRuntime.settingsLeft:Label({ Text = "Mobile action buttons" })
+    SyllinseRuntime.addToggle(mobileActionLabel, {
         State = false; Flag = "MobileActionButtons";
         Callback = function(state)
-            setMobileActionButtonsVisible(state)
+            SyllinseRuntime.setMobileActionButtonsVisible(state)
         end;
     })
 end
 
 -- A user-rebindable key hides only the Syllinse shell. Lumen's overlay remains enabled
 -- so the watermark, keybind list, and notifications stay visible when the menu is hidden.
-local uiToggleKey = Enum.KeyCode.RightControl
-local uiToggleKeyListening = false
-local uiToggleKeyLabel = settingsLeft:Label({ Text = "Toggle UI key" })
-local uiToggleKeyControl = uiToggleKeyLabel:Keybind({
+SyllinseRuntime.uiToggleKey = Enum.KeyCode.RightControl
+SyllinseRuntime.uiToggleKeyListening = false
+SyllinseRuntime.uiToggleKeyLabel = SyllinseRuntime.settingsLeft:Label({ Text = "Toggle UI key" })
+SyllinseRuntime.uiToggleKeyControl = SyllinseRuntime.uiToggleKeyLabel:Keybind({
     Title = "Toggle UI";
-    Key = uiToggleKey;
+    Key = SyllinseRuntime.uiToggleKey;
     Type = "Toggle";
     Flag = "SyllinseToggleUIKey";
     Callback = function() end;
 })
-if uiToggleKeyControl and uiToggleKeyControl.Key ~= nil then
-    uiToggleKey = uiToggleKeyControl.Key
+if SyllinseRuntime.uiToggleKeyControl and SyllinseRuntime.uiToggleKeyControl.Key ~= nil then
+    SyllinseRuntime.uiToggleKey = SyllinseRuntime.uiToggleKeyControl.Key
 end
-if uiToggleKeyControl and type(uiToggleKeyControl.Set) == "function" then
-    local originalUiToggleKeySet = uiToggleKeyControl.Set
-    uiToggleKeyControl.Set = function(key)
+if SyllinseRuntime.uiToggleKeyControl and type(SyllinseRuntime.uiToggleKeyControl.Set) == "function" then
+    local originalUiToggleKeySet = SyllinseRuntime.uiToggleKeyControl.Set
+    SyllinseRuntime.uiToggleKeyControl.Set = function(key)
         originalUiToggleKeySet(key)
-        uiToggleKey = key
+        SyllinseRuntime.uiToggleKey = key
     end
-    if uiToggleKeyControl.Flag then
-        Lumen.Flags[uiToggleKeyControl.Flag] = Lumen.Flags[uiToggleKeyControl.Flag] or {}
-        Lumen.Flags[uiToggleKeyControl.Flag].Set = uiToggleKeyControl.Set
+    if SyllinseRuntime.uiToggleKeyControl.Flag then
+        Lumen.Flags[SyllinseRuntime.uiToggleKeyControl.Flag] = Lumen.Flags[SyllinseRuntime.uiToggleKeyControl.Flag] or {}
+        Lumen.Flags[SyllinseRuntime.uiToggleKeyControl.Flag].Set = SyllinseRuntime.uiToggleKeyControl.Set
     end
-    local keyButton = uiToggleKeyControl.Frame and uiToggleKeyControl.Frame:FindFirstChild("KeyButton")
+    local keyButton = SyllinseRuntime.uiToggleKeyControl.Frame and SyllinseRuntime.uiToggleKeyControl.Frame:FindFirstChild("KeyButton")
     if keyButton then
         keyButton.Activated:Connect(function()
-            uiToggleKeyListening = true
+            SyllinseRuntime.uiToggleKeyListening = true
         end)
     end
 end
-settingsLeft:Button({
+SyllinseRuntime.settingsLeft:Button({
     Name = "Test notification";
-    Callback = function() notify("Settings", "Notification preferences are active.", "Success") end;
+    Callback = function() SyllinseRuntime.notify("Settings", "Notification preferences are active.", "Success") end;
 })
 
-local applyPanelTypography
+SyllinseRuntime.applyPanelTypography = nil
 
-local function applyWindowColor(color)
+SyllinseRuntime.applyWindowColor = function(color)
     if typeof(color) ~= "Color3" then return end
     Theme.Root = color
+    CLOSED_SURFACE = color
     root.BackgroundColor3 = color
     sidebar.BackgroundColor3 = color
     header.BackgroundColor3 = color
+    if launcher and launcher.Parent then
+        launcher.BackgroundColor3 = color
+        if launcherStroke and launcherStroke.Parent then launcherStroke.Color = Theme.Stroke end
+    end
     for _, nav in ipairs(navButtons) do nav.Button.BackgroundColor3 = color end
     Lumen.Theme.Background = color
     Lumen.ApplyTheme()
-    applyPanelTypography(Theme.PanelText)
+    SyllinseRuntime.applyPanelTypography(Theme.PanelText)
 end
-local function applyPanelColor(color)
+SyllinseRuntime.applyPanelColor = function(color)
     if typeof(color) ~= "Color3" then return end
     Theme.Surface = color
     searchFrame.BackgroundColor3 = color
@@ -3910,9 +4768,9 @@ local function applyPanelColor(color)
     Lumen.Theme.Surface = color
     Lumen.Theme.SectionBorder = Theme.Stroke
     Lumen.ApplyTheme()
-    applyPanelTypography(Theme.PanelText)
+    SyllinseRuntime.applyPanelTypography(Theme.PanelText)
 end
-applyPanelTypography = function(color)
+SyllinseRuntime.applyPanelTypography = function(color)
     -- Use Syllinse's original neutral hierarchy: regular controls are muted gray,
     -- section headings slightly brighter, and helper text quieter. Keep the font sizes
     -- readable, but cap dropdown labels so they do not run into the selection field below.
@@ -3939,8 +4797,8 @@ applyPanelTypography = function(color)
     end
 
     local function makeMobileRowTappable(control, sectionFrame, physicalHeight)
-        -- Keep the library's original row and control geometry on touch devices too.
-        return
+        if not (touchInputEnabled and not UserInputService.KeyboardEnabled) or not control then return end
+        Lumen._SyllinseExpandMobileControlRow(control, physicalHeight or 40)
     end
 
     for _, section in ipairs(Lumen.Sections or {}) do
@@ -3963,7 +4821,7 @@ applyPanelTypography = function(color)
 
                     if isSectionTitle then
                         targetColor = sectionTitle
-                        descendant.FontFace = FONT_MEDIUM
+                        descendant.FontFace = FONT_BOLD
                         descendant.TextSize = math.clamp(descendant.TextSize, 15, 16)
                         -- Shift only the section title text down by 1 px without moving the icon or divider.
                         -- PaddingTop=2 moves the centered text content down by 1 px and is reused on refresh.
@@ -4006,14 +4864,20 @@ applyPanelTypography = function(color)
                     end
                 elseif descendant:IsA("TextButton") then
                     descendant.FontFace = FONT_REGULAR
-                    -- Give mobile users a taller row for switches and keybind/action controls.
-                    -- The row grows with the target so it does not overlap the control below it.
+                    -- Color swatches sit inside RightContent. Increase their touch area on
+                    -- phones and raise the row height so the following control stays clear.
+                    if (touchInputEnabled and not UserInputService.KeyboardEnabled) and descendant.Name == "Button"
+                        and descendant.Parent and descendant.Parent.Name == "RightContent" then
+                        descendant.Size = UDim2.fromOffset(28, 28)
+                        Lumen._SyllinseExpandMobileControlRow(descendant, 40)
+                    end
+                    -- Keep the main toggle target comfortably tappable on mobile.
                     if descendant.Name == "Toggle" then
-                        makeMobileRowTappable(descendant, frame, 30)
+                        makeMobileRowTappable(descendant, frame, 40)
                     elseif descendant.Name == "KeyButton" then
-                        makeMobileRowTappable(descendant, frame, 30)
+                        makeMobileRowTappable(descendant, frame, 40)
                     elseif descendant.Name == "Click" then
-                        makeMobileRowTappable(descendant, frame, 32)
+                        makeMobileRowTappable(descendant, frame, 36)
                     end
                     if descendant.Name ~= "Click" then
                         if inDropdown and descendant.Name == "Input" then
@@ -4061,10 +4925,82 @@ applyPanelTypography = function(color)
                         end
                     end
                 elseif descendant:IsA("ImageLabel") or descendant:IsA("ImageButton") then
-                    if name == "sliderbar" then
+                    -- Lumen's keybind Settings gear can be placed in a non-square control box.
+                    -- Fit the image inside that box so its artwork stays proportional on PC
+                    -- and mobile, without changing the button's original size or hitbox.
+                    if descendant.Name == "Settings"
+                        and descendant.Parent and descendant.Parent.Name == "RightContent" then
+                        descendant.ScaleType = Enum.ScaleType.Fit
+                    end
+
+                    -- Only touch-first devices get larger hit targets. Keep the actual
+                    -- gear/bell art proportional by drawing it in a separate fitted label;
+                    -- resizing the clickable ImageButton itself must not stretch its image.
+                    if (touchInputEnabled and not UserInputService.KeyboardEnabled)
+                        and descendant.Parent and descendant.Parent.Name == "RightContent"
+                        and (descendant.Name == "Settings"
+                            or string.find(descendant.Name, "FeatureNotificationBell_", 1, true) == 1) then
+                        local touchArt = descendant:FindFirstChild("SyllinseMobileTouchArt")
+                        if not touchArt then
+                            local originalSize = descendant.Size
+                            local originalWidth = originalSize.X.Scale ~= 0 and descendant.AbsoluteSize.X or originalSize.X.Offset
+                            local originalHeight = originalSize.Y.Scale ~= 0 and descendant.AbsoluteSize.Y or originalSize.Y.Offset
+                            if originalWidth <= 0 then originalWidth = descendant.AbsoluteSize.X end
+                            if originalHeight <= 0 then originalHeight = descendant.AbsoluteSize.Y end
+                            originalWidth = math.max(1, originalWidth)
+                            originalHeight = math.max(1, originalHeight)
+
+                            local aspect = originalWidth / originalHeight
+                            local visualMax = math.floor(math.clamp(math.max(originalWidth, originalHeight) * 1.25, 18, 22) + 0.5)
+                            local visualWidth, visualHeight
+                            if aspect >= 1 then
+                                visualWidth = visualMax
+                                visualHeight = visualMax / aspect
+                            else
+                                visualHeight = visualMax
+                                visualWidth = visualMax * aspect
+                            end
+
+                            touchArt = Instance.new("ImageLabel")
+                            touchArt.Name = "SyllinseMobileTouchArt"
+                            touchArt.AnchorPoint = Vector2.new(0.5, 0.5)
+                            touchArt.Position = UDim2.fromScale(0.5, 0.5)
+                            touchArt.Size = UDim2.fromOffset(math.floor(visualWidth + 0.5), math.floor(visualHeight + 0.5))
+                            touchArt.BackgroundTransparency = 1
+                            touchArt.BorderSizePixel = 0
+                            touchArt.Image = descendant.Image
+                            touchArt.ImageColor3 = descendant.ImageColor3
+                            touchArt.ImageTransparency = descendant.ImageTransparency
+                            touchArt.ScaleType = Enum.ScaleType.Fit
+                            touchArt.ZIndex = descendant.ZIndex + 1
+                            touchArt.Active = false
+                            touchArt.Selectable = false
+                            touchArt:SetAttribute("SyllinseOriginalImageTransparency", descendant.ImageTransparency)
+                            touchArt.Parent = descendant
+                            descendant.ImageTransparency = 1
+                        end
+                        descendant.Size = UDim2.fromOffset(30, 30)
+                        Lumen._SyllinseExpandMobileControlRow(descendant, 40)
+                    end
+
+                    if descendant.Name == "SyllinseMobileTouchArt" and descendant.Parent then
+                        -- Mirror the parent button's theme tint but preserve the art's
+                        -- original transparency and its fitted aspect ratio.
+                        descendant.ImageColor3 = descendant.Parent.ImageColor3
+                        descendant.ImageTransparency = descendant:GetAttribute("SyllinseOriginalImageTransparency") or 0
+                    elseif string.find(descendant.Name, "FeatureNotificationBell_", 1, true) == 1 then
+                        local featureFlag = descendant:GetAttribute("FeatureFlag")
+                        local enabled = featureFlag and SyllinseRuntime.featureNotificationSettings[featureFlag] == true
+                        descendant.ImageColor3 = enabled and Theme.Text or Theme.Dim
+                    elseif name == "sliderbar" then
                         descendant.ImageColor3 = Theme.SliderTrack
                     else
                         descendant.ImageColor3 = iconColor
+                    end
+                    local touchArt = descendant:FindFirstChild("SyllinseMobileTouchArt")
+                    if touchArt then
+                        touchArt.ImageColor3 = descendant.ImageColor3
+                        touchArt.ImageTransparency = touchArt:GetAttribute("SyllinseOriginalImageTransparency") or 0
                     end
                 elseif descendant:IsA("Frame") then
                     if name == "button" and descendant.Parent and descendant.Parent.Name == "SliderFrame" then
@@ -4080,7 +5016,7 @@ end
 
 -- Keep Lumen popups and overlay text consistent with the Syllinse shell.
 -- Use FontFace + explicit weights so letterforms are consistent across all UI layers.
-local function applyLumenTypeface(instance)
+SyllinseRuntime.applyLumenTypeface = function(instance)
     if not instance then return end
     local function styleText(object)
         if not (object:IsA("TextLabel") or object:IsA("TextButton") or object:IsA("TextBox")) then
@@ -4088,12 +5024,12 @@ local function applyLumenTypeface(instance)
         end
         local name = string.lower(object.Name or "")
         local parentName = object.Parent and string.lower(object.Parent.Name or "") or ""
-        local medium = (name == "title" and parentName == "header")
+        local isHeader = (name == "title" and parentName == "header")
             or name == "toasttitle"
             or name == "notificationtitle"
             or name == "paragraphheader"
             or name == "headertext"
-        object.FontFace = medium and FONT_MEDIUM or FONT_REGULAR
+        object.FontFace = isHeader and FONT_BOLD or FONT_REGULAR
         object.TextScaled = false
         object.AutoLocalize = false
     end
@@ -4103,22 +5039,22 @@ local function applyLumenTypeface(instance)
     end
 end
 
-local function connectLumenTypeface(rootObject)
+SyllinseRuntime.connectLumenTypeface = function(rootObject)
     if not rootObject then return end
-    applyLumenTypeface(rootObject)
+    SyllinseRuntime.applyLumenTypeface(rootObject)
     rootObject.DescendantAdded:Connect(function(descendant)
         task.defer(function()
             if descendant and descendant.Parent then
-                applyLumenTypeface(descendant)
+                SyllinseRuntime.applyLumenTypeface(descendant)
             end
         end)
     end)
 end
 
-connectLumenTypeface(Lumen and Lumen._Instance)
-connectLumenTypeface(Lumen and Lumen._Overlay)
+SyllinseRuntime.connectLumenTypeface(Lumen and Lumen._Instance)
+SyllinseRuntime.connectLumenTypeface(Lumen and Lumen._Overlay)
 
-local function applyTextColor(color, panelColor)
+SyllinseRuntime.applyTextColor = function(color, panelColor)
     if typeof(color) ~= "Color3" then return end
     Theme.Text = color
     Theme.PanelText = panelColor or color
@@ -4127,15 +5063,20 @@ local function applyTextColor(color, panelColor)
     Lumen.Theme.Text = Theme.PanelText
     Lumen.Theme.TextDim = Theme.PanelIcon
     Lumen.ApplyTheme()
-    applyPanelTypography(Theme.PanelText)
+    SyllinseRuntime.applyPanelTypography(Theme.PanelText)
 end
-local function applyAccentColor(color)
+SyllinseRuntime.applyAccentColor = function(color)
     if typeof(color) ~= "Color3" then return end
     Theme.Accent = color
     Theme.IconActive = color
+    -- Match the launcher logo's restrained backlight to the active UI accent.
+    -- Keep the original low-intensity glow; only its hue follows the theme.
+    if launcherGlow and launcherGlow.Parent then launcherGlow.ImageColor3 = color end
+    if launcherGlowCyan and launcherGlowCyan.Parent then launcherGlowCyan.ImageColor3 = color end
+    if launcherGlowViolet and launcherGlowViolet.Parent then launcherGlowViolet.ImageColor3 = color end
     Lumen.Theme.Accent = color
     Lumen.ApplyTheme()
-    applyPanelTypography(Theme.PanelText)
+    SyllinseRuntime.applyPanelTypography(Theme.PanelText)
     for _, nav in ipairs(navButtons) do
         local selected = nav.Name == activeName
         if nav.Icon then nav.Icon.ImageColor3 = selected and color or Theme.IconIdle end
@@ -4162,33 +5103,33 @@ local function applyAccentColor(color)
     end
     if headerGear then setGearIconColor(headerGear, color) end
 end
-settingsRight:Label({ Text = "Window background" }):Colorpicker({
+SyllinseRuntime.settingsRight:Label({ Text = "Window background" }):Colorpicker({
     Title = "Window background"; Color = Theme.Root; Flag = "ThemeWindow";
-    Callback = function(color) applyWindowColor(color) end;
+    Callback = function(color) SyllinseRuntime.applyWindowColor(color) end;
 })
-settingsRight:Label({ Text = "Panel surface" }):Colorpicker({
+SyllinseRuntime.settingsRight:Label({ Text = "Panel surface" }):Colorpicker({
     Title = "Panel surface"; Color = Theme.Surface; Flag = "ThemePanels";
-    Callback = function(color) applyPanelColor(color) end;
+    Callback = function(color) SyllinseRuntime.applyPanelColor(color) end;
 })
-settingsRight:Label({ Text = "Text color" }):Colorpicker({
+SyllinseRuntime.settingsRight:Label({ Text = "Text color" }):Colorpicker({
     Title = "Text color"; Color = Theme.Text; Flag = "ThemeText";
-    Callback = function(color) applyTextColor(color) end;
+    Callback = function(color) SyllinseRuntime.applyTextColor(color) end;
 })
-settingsRight:Label({ Text = "Accent color" }):Colorpicker({
+SyllinseRuntime.settingsRight:Label({ Text = "Accent color" }):Colorpicker({
     Title = "Accent color"; Color = Theme.Accent; Flag = "ThemeAccent";
-    Callback = function(color) applyAccentColor(color) end;
+    Callback = function(color) SyllinseRuntime.applyAccentColor(color) end;
 })
-settingsRight:Button({
+SyllinseRuntime.settingsRight:Button({
     Name = "Reset theme";
     Callback = function()
-        applyWindowColor(Color3.fromRGB(23, 22, 22))
-        applyPanelColor(Color3.fromRGB(26, 25, 25))
-        applyTextColor(Color3.fromRGB(224, 223, 223), Color3.fromRGB(139, 137, 137))
-        applyAccentColor(Color3.fromRGB(224, 223, 223))
-        notify("Settings", "Theme reset.", "Success")
+        SyllinseRuntime.applyWindowColor(Color3.fromRGB(23, 22, 22))
+        SyllinseRuntime.applyPanelColor(Color3.fromRGB(26, 25, 25))
+        SyllinseRuntime.applyTextColor(Color3.fromRGB(224, 223, 223), Color3.fromRGB(139, 137, 137))
+        SyllinseRuntime.applyAccentColor(Color3.fromRGB(224, 223, 223))
+        SyllinseRuntime.notify("Settings", "Theme reset.", "Success")
     end;
 })
-settingsRight:Paragraph({ Title = "About"; Body = "Syllinse keeps its original icon rail and header. Lumen supplies the native section cards, widgets, popups and config serialization; section panels stay in their assigned columns." })
+SyllinseRuntime.settingsRight:Paragraph({ Title = "About"; Body = "Syllinse keeps its original icon rail and header. Lumen supplies the native section cards, widgets, popups and config serialization; section panels stay in their assigned columns." })
 
 -- Apply theme links once more after every page/section/control has been constructed.
 -- Lumen registers many native widget surfaces lazily as each control is created.
@@ -4197,14 +5138,14 @@ Lumen.ApplyTheme()
 -- Now every native section exists, so the phone layout can stack both Lumen columns.
 layoutResponsiveShell()
 
-applyPanelTypography(Theme.PanelText)
+SyllinseRuntime.applyPanelTypography(Theme.PanelText)
 
 -- Live feature search across Lumen's real searchable control registry. Category prefixes
 -- navigate to the matching Syllinse tab; all other terms filter Lumen rows in place.
-local function startsWith(text, prefix)
+SyllinseRuntime.startsWith = function(text, prefix)
     return text:sub(1, #prefix) == prefix
 end
-local function filterLumenControls(query)
+SyllinseRuntime.filterLumenControls = function(query)
     query = string.lower(query or "")
     local sectionMatches = {}
     local pageMatches = {}
@@ -4261,82 +5202,91 @@ searchBox:GetPropertyChangedSignal("Text"):Connect(function()
     local query = string.lower((searchBox.Text or ""):match("^%s*(.-)%s*$") or "")
     if query == "" then
         currentSearchMode = "none"
-        filterLumenControls("")
+        SyllinseRuntime.filterLumenControls("")
         return
     end
 
     local tabPrefix
     for _, item in ipairs(navItems) do
         local name = string.lower(item.Name)
-        if startsWith(name, query) then
+        if SyllinseRuntime.startsWith(name, query) then
             tabPrefix = item.Name
             break
         end
     end
     if tabPrefix then
         currentSearchMode = "tab"
-        filterLumenControls("")
+        SyllinseRuntime.filterLumenControls("")
         if activeName ~= tabPrefix then setActiveTab(tabPrefix) end
     else
         currentSearchMode = "controls"
-        filterLumenControls(query)
+        SyllinseRuntime.filterLumenControls(query)
     end
 end)
 
 -- Export the native library, page/section handles and settings so feature code can
 -- attach to the same native Lumen controls without using a second widget library.
-local SyllinseEnvironment = _G
+SyllinseRuntime.SyllinseEnvironment = _G
 if type(getgenv) == "function" then
-    local ok, environment = pcall(getgenv)
-    if ok and type(environment) == "table" then SyllinseEnvironment = environment end
+    -- Keep temporary variables inside this callback so they do not consume
+    -- registers in the already-large top-level script chunk.
+    pcall(function()
+        local environment = getgenv()
+        if type(environment) == "table" then
+            SyllinseRuntime.SyllinseEnvironment = environment
+        end
+    end)
 elseif type(shared) == "table" then
-    SyllinseEnvironment = shared
+    SyllinseRuntime.SyllinseEnvironment = shared
 end
-SyllinseEnvironment.Lumen = Lumen
-SyllinseEnvironment.SyllinseLumenWindow = LumenWindow
-SyllinseEnvironment.SyllinseLumenPages = pages
-SyllinseEnvironment.SyllinseTabs = lumenPages
-SyllinseEnvironment.SyllinseFeatureSettings = featureSettings
-SyllinseEnvironment.SyllinseRoot = root
-SyllinseEnvironment.SyllinseScreenGui = gui
-SyllinseEnvironment.SyllinseNotify = notify
-SyllinseEnvironment.SyllinseSetFeature = function(flag, value)
+SyllinseRuntime.SyllinseEnvironment.Lumen = Lumen
+SyllinseRuntime.SyllinseEnvironment.SyllinseLumenWindow = LumenWindow
+SyllinseRuntime.SyllinseEnvironment.SyllinseLumenPages = SyllinseRuntime.pages
+SyllinseRuntime.SyllinseEnvironment.SyllinseTabs = lumenPages
+SyllinseRuntime.SyllinseEnvironment.SyllinseFeatureSettings = SyllinseRuntime.featureSettings
+SyllinseRuntime.SyllinseEnvironment.SyllinseRoot = root
+SyllinseRuntime.SyllinseEnvironment.SyllinseScreenGui = gui
+SyllinseRuntime.SyllinseEnvironment.SyllinseNotify = SyllinseRuntime.notify
+SyllinseRuntime.SyllinseEnvironment.SyllinseSetFeature = function(flag, value)
     if type(flag) ~= "string" then return false end
     local ok = pcall(function() Lumen.SetFlag(flag, value) end)
     return ok
 end
-SyllinseEnvironment.SyllinseSetMobileActionButtons = setMobileActionButtonsVisible
-SyllinseEnvironment.SyllinseSetMobileKeybindButton = setMobileActionButtonVisibility
+SyllinseRuntime.SyllinseEnvironment.SyllinseSetMobileActionButtons = SyllinseRuntime.setMobileActionButtonsVisible
+SyllinseRuntime.SyllinseEnvironment.SyllinseSetMobileKeybindButton = SyllinseRuntime.setMobileActionButtonVisibility
 
 -- Correct initial tab visibility after all native sections have been mounted.
 for name, page in pairs(lumenPages) do
     if page.Frame then page.Frame.Visible = false end
 end
-setActiveTab("Combat")
+setActiveTab("Combat");
 -- Load the chosen profile after all controls/flags are registered.
-local startupAutoload = getAutoloadName()
-if startupAutoload then
-    local ok, loaded = pcall(function() return Lumen.LoadConfig(startupAutoload) end)
-    if ok and loaded then
-        notify("Configs", "Autoloaded '" .. startupAutoload .. "'.", "Success", 2)
-    else
-        notify("Configs", "Autoload failed for '" .. startupAutoload .. "'.", "Warning", 2)
+-- A do-block gives startup-only locals their own scope without ambiguous call syntax.
+do
+    local startupAutoload = getAutoloadName()
+    if startupAutoload then
+        local ok, loaded = pcall(function() return Lumen.LoadConfig(startupAutoload) end)
+        if ok and loaded then
+            SyllinseRuntime.notify("Configs", "Autoloaded '" .. startupAutoload .. "'.", "Success", 2)
+        else
+            SyllinseRuntime.notify("Configs", "Autoload failed for '" .. startupAutoload .. "'.", "Warning", 2)
+        end
     end
 end
-notify("Syllinse", "Lumen controls loaded.", "Success", 2)
+SyllinseRuntime.notify("Syllinse", "Lumen controls loaded.", "Success", 2)
 
--- Put every shell visual inside one CanvasGroup so the same grouped fade used by
--- Magik Society can run independently of the outer window's background morph.
+-- Put shell contents inside one CanvasGroup for clean hierarchy/compositing.
+-- It remains fully opaque: open/close motion is applied to the entire root shell.
 -- UIScale and the root's own corner/stroke stay on the outer frame.
 for _, child in ipairs(root:GetChildren()) do
     if child ~= motionBody and child:IsA("GuiObject") then
         child.Parent = motionBody
     end
 end
-motionBody.GroupTransparency = 1
+motionBody.GroupTransparency = 0
 refreshLauncherVisibility()
 
--- Open by morphing from the Syllinse launcher pill into the full window.
+-- Open the initial shell with the Syllinse launcher-summon animation.
 setWindowOpen(true)
 
 -- Toggle the Syllinse main window with the user-configured key. Keep Lumen's
@@ -4344,13 +5294,13 @@ setWindowOpen(true)
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
     -- The next input after clicking the key selector is the new key; don't toggle the UI
     -- while Lumen is capturing that input for rebinding.
-    if uiToggleKeyListening then
-        uiToggleKeyListening = false
+    if SyllinseRuntime.uiToggleKeyListening then
+        SyllinseRuntime.uiToggleKeyListening = false
         return
     end
     if gameProcessed then return end
 
-    local matchesToggleKey = input.KeyCode == uiToggleKey or input.UserInputType == uiToggleKey
+    local matchesToggleKey = input.KeyCode == SyllinseRuntime.uiToggleKey or input.UserInputType == SyllinseRuntime.uiToggleKey
     if matchesToggleKey then
         setWindowOpen(not windowIsOpen)
     end
