@@ -1,6 +1,6 @@
 --[[
     Syllinse shell + Lumen controls
-    v42: touch shell fills the usable viewport at native UI scale; portrait content scrolls inside the shell.
+    v43: full-size touch viewport shell, portrait column stacking, MacLib-style touch scrolling; desktop design preserved.
     Original Syllinse + native Lumen visual system preserved.
     MacLib-inspired mobile scroll guard, responsive touch layout, and optional keybind actions.
     No MacLib replacement window or duplicate widget system is loaded.
@@ -201,7 +201,6 @@ local responsiveScaleValue = 1
 local windowSizePercent = 100 -- Start at full size on both PC and mobile; updateScale() automatically fits the viewport.
 local windowSizeMultiplier = windowSizePercent / 100
 local compactTouchLayout = false
-local mobileTouchLayout = false
 local mobilePortraitLayout = false
 local mobileSafeOffsetY = 0
 local baseWindowSize
@@ -216,8 +215,10 @@ windowMotionFactor.Changed:Connect(function(value)
 end)
 root.Visible = false -- shown by the initial Syllinse-branded opening transition near the end
 
--- Responsive viewport sizing. Desktop keeps the 940x650 canvas; touch devices use
--- the usable screen dimensions directly so the actual shell becomes larger.
+-- Responsive viewport sizing.
+-- Desktop keeps the authored 940x650 shell. Touch-first devices use the available
+-- viewport as the shell canvas at 1:1 scale, rather than shrinking the entire UI to
+-- fit a 940x650 landscape rectangle on a phone.
 local function updateScale()
     local camera = Workspace.CurrentCamera
     if not camera then return end
@@ -232,14 +233,10 @@ local function updateScale()
         if typeof(bottomRight) == "Vector2" then bottomInset = math.max(0, bottomRight.Y) end
     end
 
-    -- Touch devices use the usable viewport itself as the shell canvas. This is the
-    -- important difference from the old 940x650 approach: the shell is physically
-    -- large on the phone and its text/buttons are not reduced by a tiny UIScale.
-    -- Desktop keeps the original 940x650 design canvas and scaling behavior.
-    local touchDevice = touchInputEnabled
-    local portraitTouch = touchDevice and viewport.Y > viewport.X
-    mobileTouchLayout = touchDevice
-    mobilePortraitLayout = portraitTouch
+    -- Match MacLib's touch-first device check: a touchscreen with a hardware
+    -- keyboard remains in the normal desktop layout.
+    local touchDevice = touchInputEnabled and not UserInputService.KeyboardEnabled
+    mobilePortraitLayout = touchDevice and viewport.Y > viewport.X
 
     local horizontalMargin = touchDevice and 8 or 28
     local verticalMargin = touchDevice and 8 or 18
@@ -248,19 +245,16 @@ local function updateScale()
     local availableWidth = math.max(240, viewport.X - horizontalMargin * 2)
     local availableHeight = math.max(240, viewport.Y - safeTop - safeBottom - verticalMargin * 2)
 
-    local canvasWidth = touchDevice and availableWidth or 940
-    local canvasHeight = touchDevice and availableHeight or 650
-    root.Size = UDim2.fromOffset(canvasWidth, canvasHeight)
-    baseWindowSize = root.Size
-
     if touchDevice then
-        -- A touch shell is authored in screen pixels. The optional UI-size slider
-        -- remains available, but at its default 100% the panel fills the phone.
+        -- IMPORTANT: enlarge the actual shell, not just a UIScale wrapper.
+        root.Size = UDim2.fromOffset(availableWidth, availableHeight)
         responsiveScaleValue = windowSizeMultiplier
     else
-        local fittedScale = math.min(availableWidth / canvasWidth, availableHeight / canvasHeight)
+        root.Size = UDim2.fromOffset(940, 650)
+        local fittedScale = math.min(availableWidth / 940, availableHeight / 650)
         responsiveScaleValue = math.max(0.1, math.min(fittedScale, 1)) * windowSizeMultiplier
     end
+    baseWindowSize = root.Size
 
     mobileSafeOffsetY = touchDevice and math.floor((safeTop - safeBottom) / 2) or 0
     if not windowHasCustomPosition then
@@ -269,8 +263,7 @@ local function updateScale()
 
     uiScale.Scale = responsiveScaleValue * windowMotionFactor.Value
 
-    -- Preserve the existing minimum touch target for switches when the shell must
-    -- scale below 1.0. When the shell scales up, switches scale with the rest of UI.
+    -- Preserve an accessible switch hit area if the user lowers the UI-size slider.
     local switchCompensationScale = responsiveScaleValue < 1
         and (1 / math.max(responsiveScaleValue, 0.25)) or 1
     for _, switchTrack in ipairs(gui:GetDescendants()) do
@@ -286,7 +279,7 @@ local function updateScale()
                 if switchRow.Name == "LabelFrame" then
                     local baseHeight = switchRow:GetAttribute("SyllinseToggleBaseRowHeight")
                     if type(baseHeight) == "number" and switchRow.Size.Y.Scale == 0 then
-                        local minimumPhysicalHeight = touchDevice and 46 or 24
+                        local minimumPhysicalHeight = touchDevice and 44 or 24
                         local targetHeight = math.max(baseHeight, minimumPhysicalHeight / math.max(responsiveScaleValue, 0.25))
                         switchRow.Size = UDim2.new(switchRow.Size.X.Scale, switchRow.Size.X.Offset, 0, math.ceil(targetHeight))
                         switchRow.ClipsDescendants = false
@@ -298,8 +291,8 @@ local function updateScale()
         end
     end
 
-    -- Keep a manually dragged shell within the newly fitted viewport after orientation
-    -- changes or resolution changes, preserving the dedicated top-right drag handle.
+    -- Keep a manually dragged shell within the newly fitted viewport after rotation
+    -- or resolution changes. The shell itself is now sized to the usable screen.
     if windowHasCustomPosition then
         task.defer(function()
             if not root.Parent then return end
@@ -3200,8 +3193,8 @@ SyllinseRuntime.addToggle = function(label, options)
         -- counteracts the shell's global scaling so the switch stays easy to use even
         -- when the user lowers the overall UI-size slider.
         local touchFirst = touchInputEnabled and not UserInputService.KeyboardEnabled
-        local baseSwitchWidth = touchFirst and 46 or 34
-        local baseSwitchHeight = touchFirst and 28 or 18
+        local baseSwitchWidth = touchFirst and 42 or 34
+        local baseSwitchHeight = touchFirst and 26 or 18
         track:SetAttribute("SyllinseBaseSwitchWidth", baseSwitchWidth)
         track:SetAttribute("SyllinseBaseSwitchHeight", baseSwitchHeight)
         track.Size = UDim2.fromOffset(baseSwitchWidth, baseSwitchHeight)
@@ -3222,7 +3215,7 @@ SyllinseRuntime.addToggle = function(label, options)
                     switchRow:SetAttribute("SyllinseToggleBaseRowHeight", switchRow.Size.Y.Offset)
                 end
                 local baseHeight = switchRow:GetAttribute("SyllinseToggleBaseRowHeight") or switchRow.Size.Y.Offset
-                local minimumPhysicalHeight = touchFirst and 46 or 24
+                local minimumPhysicalHeight = touchFirst and 44 or 24
                 local targetHeight = math.max(baseHeight, minimumPhysicalHeight / math.max(responsiveScaleValue, 0.25))
                 if switchRow.Size.Y.Scale == 0 then
                     switchRow.Size = UDim2.new(switchRow.Size.X.Scale, switchRow.Size.X.Offset, 0, math.ceil(targetHeight))
@@ -3250,7 +3243,7 @@ SyllinseRuntime.addToggle = function(label, options)
         if (touchInputEnabled and not UserInputService.KeyboardEnabled) then
             local indicator = track:FindFirstChild("Indicator")
             if indicator and indicator:IsA("GuiObject") then
-                indicator.Size = UDim2.fromOffset(18, 18)
+                indicator.Size = UDim2.fromOffset(16, 16)
                 indicator.BackgroundColor3 = isOn and Theme.Text or Theme.ToggleOffThumb
                 indicator.BackgroundTransparency = 0
                 if isOn then
@@ -3661,38 +3654,45 @@ end
 SyllinseRuntime.watchOuterMobileScrollFrames(Lumen._Instance)
 SyllinseRuntime.watchOuterMobileScrollFrames(Lumen._Overlay)
 
--- Responsive shell layout. Every device uses the authored desktop composition.
--- updateScale() scales this complete 940x650 canvas into the available screen area.
+-- Responsive shell layout.
+-- Touch devices use the real screen dimensions; desktop keeps the original 940x650 layout.
+-- Portrait phones stack the existing native Lumen columns in one scroll area. Landscape
+-- phones keep the familiar two-column page, but use a wider rail/header fit for touch.
 layoutResponsiveShell = function()
     if not root or not root.Parent then return end
 
-    local canvasW = mobileTouchLayout and root.Size.X.Offset or 940
-    local canvasH = mobileTouchLayout and root.Size.Y.Offset or 650
+    local touchFirst = touchInputEnabled and not UserInputService.KeyboardEnabled
+    local canvasW = touchFirst and root.Size.X.Offset or 940
+    local canvasH = touchFirst and root.Size.Y.Offset or 650
+    local isPortraitPhone = touchFirst and mobilePortraitLayout
+    local railWidth = isPortraitPhone and 68 or (touchFirst and 70 or 77)
 
-    -- PORTRAIT PHONE: retain the Syllinse side rail and header, but use the full
-    -- available phone height. Both original Lumen columns scroll vertically inside
-    -- the shell; they are not enlarged independently.
-    if mobilePortraitLayout then
-        local railWidth = 66
-        compactTouchLayout = true
-        PANEL_TOP = 76
-        FOOTER_HEIGHT = 30
+    compactTouchLayout = isPortraitPhone
+    PANEL_TOP = isPortraitPhone and 76 or (touchFirst and 68 or 73)
+    FOOTER_HEIGHT = isPortraitPhone and 28 or (touchFirst and 30 or 34)
 
-        sidebar.Size = UDim2.new(0, railWidth, 1, 0)
-        sideDivider.Position = UDim2.fromOffset(railWidth - 1, 0)
-        header.Position = UDim2.fromOffset(railWidth, 0)
-        header.Size = UDim2.new(1, -railWidth, 0, PANEL_TOP)
+    sidebar.Size = UDim2.new(0, railWidth, 1, 0)
+    sideDivider.Position = UDim2.fromOffset(railWidth - 1, 0)
+    header.Position = UDim2.fromOffset(railWidth, 0)
+    header.Size = UDim2.new(1, -railWidth, 0, PANEL_TOP)
 
-        local headerWidth = math.max(180, canvasW - railWidth)
-        local searchWidth = math.clamp(headerWidth - 182, 112, 160)
+    if isPortraitPhone then
+        -- Keep the Syllinse rail and title/search row recognizable, but give the
+        -- content the full remaining phone width instead of shrinking desktop columns.
+        local headerWidth = math.max(170, canvasW - railWidth)
+        local searchWidth = math.clamp(headerWidth - 180, 96, 160)
+        local searchLeft = headerWidth - 54 - searchWidth
         searchFrame.AnchorPoint = Vector2.new(1, 0)
-        -- Leave a clear 48px drag-button lane at the far right of the header.
-        searchFrame.Position = UDim2.new(1, -58, 0, 17)
+        searchFrame.Position = UDim2.new(1, -54, 0, 17)
         searchFrame.Size = UDim2.fromOffset(searchWidth, 42)
+        searchBox.TextSize = 15
         avatar.Visible = false
-        dragHandle.Size = UDim2.new(0, math.max(108, headerWidth - searchWidth - 74), 1, 0)
-        headerTitle.Size = UDim2.new(0, 56, 0, 34)
+        headerTitle.Visible = headerWidth >= 250
+        headerTitle.Size = UDim2.fromOffset(math.max(40, searchLeft - 52), 34)
+        headerTitle.TextSize = 16
+        dragHandle.Size = UDim2.new(0, math.max(48, searchLeft - 8), 1, 0)
 
+        -- Keep the original logo, soft glow, grayscale theme and icon assets.
         logo.Size = UDim2.fromOffset(78, 86)
         logo.Position = UDim2.fromOffset(-4, -7)
         logoGlowCyan.Size = UDim2.fromOffset(88, 90)
@@ -3705,71 +3705,75 @@ layoutResponsiveShell = function()
             logoFallback.Position = UDim2.fromOffset(6, 8)
         end
 
-        -- Six large, evenly distributed tab hit targets down the rail.
-        local navTop = 126
-        local navBottom = math.max(navTop + 5 * 36, canvasH - FOOTER_HEIGHT - 64)
+        -- Distribute the six existing tab buttons down the phone rail. No new menu
+        -- tiles or replacement icons are introduced.
+        local navTop = 116
+        local navBottom = math.max(navTop + 5 * 38, canvasH - FOOTER_HEIGHT - 54)
         local navStep = (navBottom - navTop) / math.max(#navButtons - 1, 1)
-        local navTapSize = math.max(28, math.min(52, navStep - 8))
+        local navTapSize = math.clamp(navStep - 7, 34, 52)
         for index, nav in ipairs(navButtons) do
             local y = math.floor(navTop + (index - 1) * navStep + 0.5)
             nav.Button.Size = UDim2.fromOffset(navTapSize, navTapSize)
             nav.Button.Position = UDim2.fromOffset((railWidth - navTapSize) / 2, y)
             if nav.Icon then
-                nav.Icon.Size = UDim2.fromOffset(navTapSize + 4, navTapSize + 4)
+                nav.Icon.Size = UDim2.fromOffset(navTapSize + 6, navTapSize + 6)
                 nav.Icon.Position = UDim2.fromScale(0.5, 0.5)
                 local fallback = nav.Button:FindFirstChild("ImageFallback")
-                if fallback then fallback.Size = UDim2.fromOffset(40, 40) end
+                if fallback then fallback.Size = UDim2.fromOffset(math.min(42, navTapSize), math.min(42, navTapSize)) end
             end
             local terminologyLabel = terminologyLabels[nav.Name]
             if terminologyLabel then
-                terminologyLabel.Size = UDim2.fromOffset(railWidth, 15)
+                terminologyLabel.Size = UDim2.fromOffset(railWidth, 14)
                 terminologyLabel.Position = UDim2.fromOffset(railWidth / 2, y + navTapSize - 1)
-                terminologyLabel.TextSize = 10
+                terminologyLabel.TextSize = 9
             end
         end
 
+        -- The active category icon remains aligned with its title in the header.
         for _, item in ipairs(navItems) do
             local entry = headerIcons[item.Name]
             if entry then
                 entry.Holder.Size = UDim2.fromOffset(42, 42)
-                entry.Holder.Position = UDim2.fromOffset(4, 16)
+                entry.Holder.Position = UDim2.fromOffset(3, 16)
                 if entry.Icon then
-                    local iconSize = math.max(29, (item.HeaderIconSize or 30) + 2)
+                    local iconSize = math.max(28, (item.HeaderIconSize or 30) + 1)
                     entry.Icon.Size = UDim2.fromOffset(iconSize, iconSize)
                 end
             end
         end
         if headerGear then
-            headerGear.Container.Position = UDim2.fromOffset(27, 38)
+            headerGear.Container.Position = UDim2.fromOffset(25, 37)
             headerGear.Container.Size = UDim2.fromOffset(25, 25)
         end
 
         footerBar.Size = UDim2.new(1, 0, 0, FOOTER_HEIGHT)
         footerBar.Position = UDim2.new(0, 0, 1, -FOOTER_HEIGHT)
-        footerLeftText.Size = UDim2.new(1, -126, 1, 0)
-        footerLeftText.TextSize = 11
-        footerBrand.Size = UDim2.new(0, 112, 0, FOOTER_HEIGHT)
+        footerLeftText.Size = UDim2.new(1, -116, 1, 0)
+        footerLeftText.TextSize = 10
+        footerBrand.Size = UDim2.new(0, 104, 0, FOOTER_HEIGHT)
         footerBrand.Position = UDim2.new(1, -8, 1, -FOOTER_HEIGHT)
-        footerBrand.TextSize = 12
+        footerBrand.TextSize = 11
         PANEL_HEIGHT = canvasH - PANEL_TOP - (footerBar.Visible and FOOTER_HEIGHT or 0)
 
         for tabName, page in pairs(lumenPages) do
             local hosts = lumenHosts[tabName]
             local active = tabName == activeName
-            local frame = page and page.Frame
             if hosts then
                 local mobile = hosts.Mobile
                 if mobile then
-                    mobile.Position = UDim2.fromOffset(railWidth + 7, PANEL_TOP + 8)
-                    mobile.Size = UDim2.new(1, -(railWidth + 16), 1,
-                        -(PANEL_TOP + (footerBar.Visible and FOOTER_HEIGHT or 0) + 16))
+                    mobile.Position = UDim2.fromOffset(railWidth + 7, PANEL_TOP + 7)
+                    mobile.Size = UDim2.new(1, -(railWidth + 15), 1,
+                        -(PANEL_TOP + (footerBar.Visible and FOOTER_HEIGHT or 0) + 14))
                     mobile.AutomaticCanvasSize = Enum.AutomaticSize.Y
+                    mobile.CanvasSize = UDim2.new()
                     mobile.ScrollingEnabled = true
-                    mobile.ScrollBarThickness = 5
+                    mobile.ScrollBarThickness = 8
+                    mobile.ScrollBarImageColor3 = Theme.Dim
+                    mobile.ScrollBarImageTransparency = 0.12
                     mobile.Visible = active
-                    mobile.ZIndex = 5
+                    mobile.Active = true
                     if hosts.MobileLayout then
-                        hosts.MobileLayout.Padding = UDim.new(0, 10)
+                        hosts.MobileLayout.Padding = UDim.new(0, 12)
                     end
                 end
 
@@ -3786,16 +3790,20 @@ layoutResponsiveShell = function()
                         column.ScrollingEnabled = false
                         column.ScrollBarThickness = 0
                         column.ScrollBarImageTransparency = 1
+                        column.Active = false
                         column.ClipsDescendants = false
+                        column.BackgroundTransparency = 1
+                        column.BorderSizePixel = 0
                         column.ZIndex = 6
 
                         local listLayout = column:FindFirstChildOfClass("UIListLayout")
                         local function refreshMobileColumnHeight()
                             if not mobilePortraitLayout or column.Parent ~= mobile then return end
                             local contentHeight = listLayout and listLayout.AbsoluteContentSize.Y or 0
-                            column.Size = UDim2.new(1, -8, 0, math.max(60, math.ceil(contentHeight + 18)))
+                            column.Size = UDim2.new(1, -8, 0, math.max(64, math.ceil(contentHeight + 18)))
                         end
                         refreshMobileColumnHeight()
+                        task.defer(refreshMobileColumnHeight)
                         if listLayout then
                             hosts.MobileColumnConnections = hosts.MobileColumnConnections or {}
                             if not hosts.MobileColumnConnections[column] then
@@ -3807,10 +3815,10 @@ layoutResponsiveShell = function()
                     end
                 end
             end
-            if frame then
-                frame.Visible = false
-                frame.Position = UDim2.fromOffset(0, 0)
-                frame.Size = UDim2.new(1, 0, 1, 0)
+            if page and page.Frame then
+                page.Frame.Visible = false
+                page.Frame.Position = UDim2.fromOffset(0, 0)
+                page.Frame.Size = UDim2.new(1, 0, 1, 0)
             end
         end
 
@@ -3818,44 +3826,36 @@ layoutResponsiveShell = function()
         return
     end
 
-    -- LANDSCAPE TOUCH / TABLET / DESKTOP: use the full touch viewport where present.
-    -- The two-column desktop composition remains intact, but the touch rail is
-    -- redistributed vertically so its tabs remain reachable on a short phone screen.
-    local isTouchLandscape = mobileTouchLayout
-    local railWidth = isTouchLandscape and 70 or 77
-    compactTouchLayout = false
-    PANEL_TOP = isTouchLandscape and 68 or 73
-    FOOTER_HEIGHT = isTouchLandscape and 30 or 34
-
-    sidebar.Size = UDim2.new(0, railWidth, 1, 0)
-    sideDivider.Position = UDim2.fromOffset(railWidth - 1, 0)
-    header.Position = UDim2.fromOffset(railWidth, 0)
-    header.Size = UDim2.new(1, -railWidth, 0, PANEL_TOP)
-
+    -- Landscape touch and desktop retain the original two-column Syllinse composition.
+    local isTouchLandscape = touchFirst
     if isTouchLandscape then
-        local headerWidth = math.max(240, canvasW - railWidth)
-        local showAvatar = headerWidth >= 650
-        local searchWidth = math.clamp(headerWidth - (showAvatar and 430 or 160), 138, 224)
+        local headerWidth = math.max(220, canvasW - railWidth)
+        local showAvatar = headerWidth >= 900
+        local searchWidth = math.clamp(headerWidth - (showAvatar and 470 or 300), 120, 224)
+        local searchLeft = headerWidth - 58 - searchWidth
         searchFrame.AnchorPoint = Vector2.new(1, 0)
-        -- Keep the search box clear of the dedicated move/drag button.
         searchFrame.Position = UDim2.new(1, -58, 0, 13)
         searchFrame.Size = UDim2.fromOffset(searchWidth, 42)
+        searchBox.TextSize = 16
         avatar.Visible = showAvatar
         if showAvatar then
             avatar.Size = UDim2.fromOffset(38, 38)
             avatar.Position = UDim2.new(1, -(searchWidth + 110), 0, 15)
         end
-        dragHandle.Size = UDim2.new(0, math.max(140, headerWidth - searchWidth - (showAvatar and 112 or 34)), 1, 0)
-        headerTitle.Size = UDim2.new(0, 190, 0, 34)
+        headerTitle.Visible = searchLeft >= 108
+        headerTitle.Size = UDim2.fromOffset(math.clamp(searchLeft - 52, 48, 190), 34)
+        dragHandle.Size = UDim2.new(0, math.max(48, searchLeft - 8), 1, 0)
     else
         searchFrame.AnchorPoint = Vector2.new(1, 0)
         searchFrame.Position = UDim2.new(1, -54, 0, 13)
         searchFrame.Size = UDim2.fromOffset(242, 46)
+        searchBox.TextSize = 17
         avatar.Visible = true
         avatar.Size = UDim2.fromOffset(42, 42)
         avatar.Position = UDim2.new(1, -354, 0, 15)
-        dragHandle.Size = UDim2.new(0, 470, 1, 0)
+        headerTitle.Visible = true
         headerTitle.Size = UDim2.new(0, 250, 0, 34)
+        dragHandle.Size = UDim2.new(0, 470, 1, 0)
     end
 
     logo.Size = UDim2.fromOffset(92, 100)
@@ -3869,12 +3869,27 @@ layoutResponsiveShell = function()
         logoFallback.Size = UDim2.fromOffset(60, 60)
         logoFallback.Position = UDim2.fromOffset(8, 10)
     end
+    if headerGear then
+        headerGear.Container.Position = UDim2.fromOffset(29, 35)
+        headerGear.Container.Size = UDim2.fromOffset(25, 25)
+    end
+    for _, item in ipairs(navItems) do
+        local entry = headerIcons[item.Name]
+        if entry then
+            entry.Holder.Size = UDim2.fromOffset(44, 44)
+            entry.Holder.Position = UDim2.fromOffset(item.HeaderIconX or 6, item.HeaderIconY or 15)
+            if entry.Icon then
+                entry.Icon.Size = UDim2.fromOffset(item.HeaderIconWidth or item.HeaderIconSize or 48,
+                    item.HeaderIconHeight or item.HeaderIconSize or 48)
+            end
+        end
+    end
 
     if isTouchLandscape then
-        local navTop = 82
-        local navBottom = math.max(navTop + 5 * 26, canvasH - FOOTER_HEIGHT - 46)
+        local navTop = 78
+        local navBottom = math.max(navTop + 5 * 32, canvasH - FOOTER_HEIGHT - 42)
         local navStep = (navBottom - navTop) / math.max(#navButtons - 1, 1)
-        local navTapSize = math.max(28, math.min(44, navStep - 4))
+        local navTapSize = math.clamp(navStep - 8, 30, 46)
         for index, nav in ipairs(navButtons) do
             local y = math.floor(navTop + (index - 1) * navStep + 0.5)
             nav.Button.Size = UDim2.fromOffset(navTapSize, navTapSize)
@@ -3896,6 +3911,12 @@ layoutResponsiveShell = function()
         for _, nav in ipairs(navButtons) do
             nav.Button.Size = UDim2.fromOffset(46, 46)
             nav.Button.Position = UDim2.fromOffset(15, nav.BaseY or 122)
+            local terminologyLabel = terminologyLabels[nav.Name]
+            if terminologyLabel then
+                terminologyLabel.Size = UDim2.fromOffset(77, 18)
+                terminologyLabel.Position = UDim2.fromOffset(38.5, nav.TerminologyLabelY or 0)
+                terminologyLabel.TextSize = 14
+            end
         end
     end
 
@@ -3934,15 +3955,19 @@ layoutResponsiveShell = function()
                 if isTouchLandscape then
                     local contentLeft = railWidth + 10
                     local contentRight = 12
-                    local gap = 12
-                    local contentWidth = math.max(200, canvasW - contentLeft - contentRight)
-                    local columnWidth = math.max(90, (contentWidth - gap) / 2)
+                    local gap = 14
+                    local contentWidth = math.max(220, canvasW - contentLeft - contentRight)
+                    local columnWidth = math.max(110, (contentWidth - gap) / 2)
                     if index == 1 then
                         column.Position = UDim2.fromOffset(contentLeft, PANEL_TOP)
                     else
                         column.Position = UDim2.fromOffset(contentLeft + columnWidth + gap, PANEL_TOP)
                     end
                     column.Size = UDim2.fromOffset(columnWidth, PANEL_HEIGHT)
+                    column.Active = true
+                    column.ScrollBarThickness = 10
+                    column.ScrollBarImageTransparency = 0.16
+                    SyllinseRuntime.bindMobileScrollGuard(column)
                 else
                     if index == 1 then
                         column.Position = UDim2.fromOffset(86, PANEL_TOP)
@@ -3951,6 +3976,7 @@ layoutResponsiveShell = function()
                         column.Position = UDim2.new(0.5, 41, 0, PANEL_TOP)
                         column.Size = UDim2.new(0.5, -48, 0, PANEL_HEIGHT)
                     end
+                    column.Active = true
                 end
                 column.ZIndex = 1
             end
@@ -3962,7 +3988,7 @@ layoutResponsiveShell = function()
         end
     end
 
-    -- Do not reset launcher.Position: resizing the shell must not move a dragged launcher.
+    -- Keep the launcher fixed; resizing the shell must not move a dragged launcher.
     if baseWindowSize then baseWindowSize = root.Size end
 end
 
@@ -4975,7 +5001,7 @@ SyllinseRuntime.applyPanelTypography = function(color)
                     if isSectionTitle then
                         targetColor = sectionTitle
                         descendant.FontFace = FONT_BOLD
-                        descendant.TextSize = math.clamp(descendant.TextSize, 17, 18)
+                        descendant.TextSize = math.clamp(descendant.TextSize, 15, 16)
                         -- Shift only the section title text down by 1 px without moving the icon or divider.
                         -- PaddingTop=2 moves the centered text content down by 1 px and is reused on refresh.
                         local titleYOffset = descendant:FindFirstChild("SyllinseTitleYOffset")
@@ -4991,20 +5017,20 @@ SyllinseRuntime.applyPanelTypography = function(color)
                     elseif isSecondary then
                         targetColor = secondaryText
                         descendant.FontFace = FONT_REGULAR
-                        descendant.TextSize = math.clamp(descendant.TextSize, touchInputEnabled and 14 or 13, touchInputEnabled and 15 or 14)
+                        descendant.TextSize = math.clamp(descendant.TextSize, 13, 14)
                     elseif isValue then
                         targetColor = valueColor
                         descendant.FontFace = FONT_REGULAR
-                        descendant.TextSize = math.clamp(descendant.TextSize, touchInputEnabled and 15 or 14, touchInputEnabled and 16 or 15)
+                        descendant.TextSize = math.clamp(descendant.TextSize, 14, 15)
                     else
                         descendant.FontFace = FONT_REGULAR
-                        descendant.TextSize = math.clamp(descendant.TextSize, touchInputEnabled and 15 or 14, touchInputEnabled and 16 or 15)
+                        descendant.TextSize = math.clamp(descendant.TextSize, 14, 15)
                     end
 
                     -- Label text above dropdown fields is the cramped case. A 14 px cap
                     -- keeps those labels inside their original row without moving any UI.
                     if inDropdown and not isValue then
-                        descendant.TextSize = math.min(descendant.TextSize, touchInputEnabled and 15 or 14)
+                        descendant.TextSize = math.min(descendant.TextSize, 14)
                     end
 
                     if inDropdown and (name == "input" or isValue) then
@@ -5017,20 +5043,16 @@ SyllinseRuntime.applyPanelTypography = function(color)
                     end
                 elseif descendant:IsA("TextButton") then
                     descendant.FontFace = FONT_REGULAR
-                    -- Color swatches sit inside RightContent. Increase their touch area on
-                    -- phones and raise the row height so the following control stays clear.
-                    if (touchInputEnabled and not UserInputService.KeyboardEnabled) and descendant.Name == "Button"
-                        and descendant.Parent and descendant.Parent.Name == "RightContent" then
-                        descendant.Size = UDim2.fromOffset(30, 30)
-                        Lumen._SyllinseExpandMobileControlRow(descendant, 40)
-                    end
+                    -- Keep color swatches at their native compact size on mobile. MacLib's
+                    -- reference uses a 21px swatch in a 38px row; enlarging every swatch
+                    -- to a 28px hitbox made the Settings color controls dominate the page.
                     -- Keep the main toggle target comfortably tappable on mobile.
                     if descendant.Name == "Toggle" then
-                        makeMobileRowTappable(descendant, frame, 46)
+                        makeMobileRowTappable(descendant, frame, 40)
                     elseif descendant.Name == "KeyButton" then
-                        makeMobileRowTappable(descendant, frame, 46)
+                        makeMobileRowTappable(descendant, frame, 44)
                     elseif descendant.Name == "Click" then
-                        makeMobileRowTappable(descendant, frame, 42)
+                        makeMobileRowTappable(descendant, frame, 40)
                     end
                     if descendant.Name ~= "Click" then
                         if inDropdown and descendant.Name == "Input" then
@@ -5043,10 +5065,10 @@ SyllinseRuntime.applyPanelTypography = function(color)
                         descendant.TextSize = math.clamp(descendant.TextSize, 14, 15)
                         -- Keep dropdown text legible but within its original field.
                         if inDropdown then
-                            descendant.TextSize = math.min(descendant.TextSize, touchInputEnabled and 16 or 15)
+                            descendant.TextSize = math.min(descendant.TextSize, 15)
                         end
                     else
-                        descendant.TextSize = touchInputEnabled and 14 or 13
+                        descendant.TextSize = 13
                         descendant.BackgroundColor3 = Theme.Surface
                         descendant.BackgroundTransparency = 0
                         descendant.AutoButtonColor = false
@@ -5288,7 +5310,7 @@ SyllinseRuntime.settingsRight:Paragraph({ Title = "About"; Body = "Syllinse keep
 -- Lumen registers many native widget surfaces lazily as each control is created.
 Lumen.ApplyTheme()
 
--- Now every native section exists; apply the same desktop composition on every device.
+-- Now every native section exists; apply the responsive desktop/mobile composition.
 layoutResponsiveShell()
 
 SyllinseRuntime.applyPanelTypography(Theme.PanelText)
