@@ -226,11 +226,16 @@ local function updateScale()
         local topInset = 0
         local okInset, inset = pcall(function() return GuiService:GetGuiInset() end)
         if okInset and inset then topInset = math.max(0, inset.Y) end
+        -- Keep a real margin around the shell on touch devices, including
+        -- landscape phones where the old fit nearly filled the entire screen.
+        -- Width and height are calculated from the safe viewport so the footer
+        -- stays inside the window and the content area remains scrollable.
         mobileSafeOffsetY = math.floor(topInset / 2)
-        local fittedWidth = math.min(940, math.max(240, viewport.X - 16))
-        local usableHeight = viewport.Y - topInset - 12
-        local fittedHeight = math.min(650, math.max(220, usableHeight))
-        root.Size = UDim2.fromOffset(fittedWidth, fittedHeight)
+        local usableWidth = math.max(240, viewport.X - 24)
+        local fittedWidth = math.min(940, math.max(240, usableWidth * 0.88))
+        local usableHeight = math.max(220, viewport.Y - topInset - 16)
+        local fittedHeight = math.min(650, math.max(220, usableHeight * 0.88))
+        root.Size = UDim2.fromOffset(math.floor(fittedWidth), math.floor(fittedHeight))
         if not windowHasCustomPosition then
             root.Position = UDim2.new(0.5, 0, 0.5, mobileSafeOffsetY)
         end
