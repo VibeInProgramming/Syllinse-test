@@ -188,6 +188,37 @@ Theme.Setup = {
             Snowfall = true,
             ChristmasShine = true,
         },
+        {
+            Id = "Halloween",
+            Name = "Halloween",
+            Description = "Charcoal with orange accents, drifting embers and violet and gold decorations.",
+            Root = Color3.fromRGB(29, 29, 31),
+            Surface = Color3.fromRGB(31, 31, 34),
+            Accent = Color3.fromRGB(255, 108, 0),
+            Text = Color3.fromRGB(255, 255, 255),
+            Subtext = Color3.fromRGB(172, 169, 186),
+            TabIcons = Color3.fromRGB(112, 110, 120),
+            ActiveTabIcon = Color3.fromRGB(255, 108, 0),
+            HeaderIconTint = Color3.fromRGB(143, 143, 143),
+            HeaderTitleTint = Color3.fromRGB(211, 211, 211),
+            Border = Color3.fromRGB(47, 46, 51),
+            GradientStrength = 0,
+            ButtonTint = 0,
+            ButtonHoverTint = 0.08,
+            ButtonFill = Color3.fromRGB(30, 30, 30),
+            ButtonHoverFill = Color3.fromRGB(41, 41, 41),
+            NeutralButtonHover = true,
+            ToggleOnTrack = Color3.fromRGB(255, 106, 0),
+            ToggleOnThumb = Color3.fromRGB(10, 10, 10),
+            ToggleOffThumb = Color3.fromRGB(10, 10, 10),
+            SliderTrack = Color3.fromRGB(39, 39, 41),
+            SliderFillBottom = Color3.fromRGB(184, 0, 0),
+            SliderFillTop = Color3.fromRGB(255, 26, 0),
+            SliderHandle = Color3.fromRGB(254, 183, 6),
+            ModuleTransparency = 100,
+            PanelDivider = "Line",
+            HalloweenParticles = true,
+        },
     },
 }
 
@@ -220,7 +251,6 @@ end
 -- ================================================================
 local SYLLINSE_MANUAL_ICONS = {
     SettingsTab = "rbxassetid://76254758372811", -- left navigation Settings icon
-    SliderThumbs = {}, -- Map dropdown names to rbxassetid:// image URIs.
     Settings = { -- keybind/settings gear beside each control
         Image = "rbxassetid://133013236590645",
         RowOrder = 2,
@@ -300,7 +330,7 @@ local SYLLINSE_MANUAL_STYLE = {
         Toast = 8,
         Progress = 2,
         StatusDot = 4,
-        NumericInput = 3,
+        NumericInput = 5,
     },
 }
 
@@ -2762,6 +2792,15 @@ end
 ]])
     if not didPatch then warn("[Syllinse] Could not update slider touch handling") end
 
+    librarySource, didPatch = replaceLibraryText(librarySource,
+        'Click.MouseEnter:Connect(function()\n\t\tGrad.Enabled = true',
+        'Click.MouseEnter:Connect(function()\n\t\tif Library._SyllinseNeutralButtonHover then return end\n\t\tGrad.Enabled = true')
+    if not didPatch then warn("[Syllinse] Could not configure the native button hover") end
+    librarySource, didPatch = replaceLibraryText(librarySource,
+        'Click.MouseLeave:Connect(function()\n\t\tGrad.Enabled = false',
+        'Click.MouseLeave:Connect(function()\n\t\tGrad.Enabled = false\n\t\tif Library._SyllinseNeutralButtonHover then return end')
+    if not didPatch then warn("[Syllinse] Could not configure the native button hover reset") end
+
     local compileLibrary = loadstring(librarySource)
     assert(type(compileLibrary) == "function", "Lumen source could not be compiled after compatibility patches")
     return compileLibrary()
@@ -4930,6 +4969,15 @@ SyllinseRuntime.addToggle = function(label, options)
     -- Keep Lumen's native toggle behavior and geometry, but use a visible charcoal
     -- off track. Lumen's internal click handler tweens the track back to near-black,
     -- so the style is also re-applied after native activation/state animations.
+    local function switchThumbColors()
+        local preset = SyllinseRuntime.activeAppearancePalette
+        local on = (preset and preset.ToggleOnThumb) or (Theme.ThemedControls and Theme.Accent:Lerp(Theme.Text, 0.35))
+            or SYLLINSE_MANUAL_STYLE.Switch.ThumbOnColor or Color3.fromRGB(226, 224, 224)
+        local off = (preset and preset.ToggleOffThumb)
+            or (not Theme.ThemedControls and SYLLINSE_MANUAL_STYLE.Switch.ThumbOffColor) or Theme.ToggleOffThumb
+        return on, off
+    end
+
     local function applySyllinseToggleStyle(isOn, preserveNativeAnimation, snapIndicator)
         local frame = control and control.Frame
         if not frame or not frame.Parent then return end
@@ -5049,12 +5097,11 @@ SyllinseRuntime.addToggle = function(label, options)
             end
         end
 
-        local onTrackColor = Theme.ThemedControls and Theme.Surface:Lerp(Theme.Accent, 0.56)
+        local preset = SyllinseRuntime.activeAppearancePalette
+        local onTrackColor = (preset and preset.ToggleOnTrack) or (Theme.ThemedControls and Theme.Surface:Lerp(Theme.Accent, 0.56))
             or SYLLINSE_MANUAL_STYLE.Switch.TrackOnColor or Color3.fromRGB(145, 143, 143)
         local offTrackColor = not Theme.ThemedControls and SYLLINSE_MANUAL_STYLE.Switch.TrackOffColor or Theme.ToggleOffTrack
-        local onThumbColor = Theme.ThemedControls and Theme.Accent:Lerp(Theme.Text, 0.35)
-            or SYLLINSE_MANUAL_STYLE.Switch.ThumbOnColor or Color3.fromRGB(226, 224, 224)
-        local offThumbColor = not Theme.ThemedControls and SYLLINSE_MANUAL_STYLE.Switch.ThumbOffColor or Theme.ToggleOffThumb
+        local onThumbColor, offThumbColor = switchThumbColors()
 
         -- Keep the track itself as the OFF base. Lumen paints its ON state using
         -- the child named Overlay, so recolor that overlay too (not only the parent).
@@ -5219,8 +5266,7 @@ SyllinseRuntime.addToggle = function(label, options)
         if not indicator or not indicator:IsA("GuiObject") then return end
 
         local thumbInset = math.max(0, tonumber(SYLLINSE_MANUAL_STYLE.Switch.ThumbInset) or 3.5)
-        local onThumbColor = SYLLINSE_MANUAL_STYLE.Switch.ThumbOnColor or Color3.fromRGB(226, 224, 224)
-        local offThumbColor = SYLLINSE_MANUAL_STYLE.Switch.ThumbOffColor or Theme.ToggleOffThumb
+        local onThumbColor, offThumbColor = switchThumbColors()
         local targetAnchor = state and Vector2.new(1, 0.5) or Vector2.new(0, 0.5)
         local targetPosition = state
             and UDim2.new(1, -thumbInset, 0.5, 0)
@@ -5721,9 +5767,17 @@ layoutResponsiveShell = function()
 
 end
 
--- Make each slider's displayed number directly editable without replacing its
--- native Lumen slider. The field is positioned over the existing value readout,
--- and routes numeric edits through the same native Set/Callback path as dragging.
+SyllinseRuntime.styleSliderValueBox = function(field)
+    local editor = field:FindFirstChild("SyllinseNumericSliderInput")
+    local suffix = field:FindFirstChild("SyllinseNumericSliderSuffix")
+    local stroke = field:FindFirstChildOfClass("UIStroke")
+    field.BackgroundColor3 = Theme.Surface:Lerp(Theme.PanelValue, 0.04)
+    editor.TextColor3 = Theme.PanelValue
+    if suffix then suffix.TextColor3 = Theme.PanelValue end
+    stroke.Color = editor:IsFocused() and Theme.Stroke:Lerp(Theme.PanelValue, 0.25) or Theme.Stroke
+end
+
+-- Replace the native readout with an editable value that uses the same Set/Callback path as dragging.
 SyllinseRuntime.addNumericSlider = function(section, options)
     local sliderOptions = table.clone(options or {})
     local userCallback = sliderOptions.Callback
@@ -5731,7 +5785,7 @@ SyllinseRuntime.addNumericSlider = function(section, options)
     local minimum = tonumber(sliderOptions.Min) or 0
     local maximum = tonumber(sliderOptions.Max) or 100
     local increment = math.max(tonumber(sliderOptions.Increment) or 1, 0.000001)
-    local suffix = type(sliderOptions.Suffix) == "string" and string.gsub(sliderOptions.Suffix, "^%s+", "") or ""
+    local suffix = type(sliderOptions.Suffix) == "string" and sliderOptions.Suffix or ""
     local numericEditor
     local nativeValueLabel
 
@@ -5824,7 +5878,7 @@ SyllinseRuntime.addNumericSlider = function(section, options)
                 score = 10 - math.min(math.abs(number - currentValue), 1000) / 1000
                 if math.abs(number - currentValue) < 0.0001 then score = score + 100 end
             end
-            if name == "value" or name == "slidervalue" or name == "valuelabel" then
+            if name == "amount" or name == "value" or name == "slidervalue" or name == "valuelabel" then
                 score = math.max(score, 500)
             elseif string.find(name, "value", 1, true) or string.find(name, "number", 1, true) then
                 score = math.max(score, 300)
@@ -5914,72 +5968,84 @@ SyllinseRuntime.addNumericSlider = function(section, options)
             nativeValueLabel.Visible = false
         end
 
-        -- Keep the numeric editor visually indistinguishable from Lumen's own value
-        -- readout: compact, transparent, and using the same native type/color. A subtle
-        -- fill/stroke appears only while editing so it remains discoverable without
-        -- creating a large pill that clashes with the rest of the UI.
-        local suffixText = suffix
-        local suffixWidth = suffixText == "" and 0 or math.clamp(
-            #suffixText * (touchInputEnabled and 7 or 5) + 3, 10, touchInputEnabled and 52 or 42)
-        local digitCount = #formatNumber(currentValue)
-        local editorWidth = math.clamp(digitCount * (touchInputEnabled and 8 or 6) + 5, 24, 42)
-        local nativeTextSize = touchInputEnabled and 16 or (nativeValueLabel and nativeValueLabel.TextSize or 12)
-        local nativeAbsHeight = nativeValueLabel and nativeValueLabel.AbsoluteSize.Y or 0
-        local fieldHeight = touchInputEnabled and 19
-            or math.clamp(nativeAbsHeight > 0 and nativeAbsHeight or (nativeTextSize + 2), 13, 17)
-        local valueRightOffset = rightOffset - suffixWidth - (suffixWidth > 0 and 2 or 0)
+        local textSize = touchInputEnabled and 16 or 13
+        local fieldHeight, padding = textSize + 5, 5
+        local bounds = Vector2.new(1024, 1024)
+        local function measureWidth(value)
+            return math.ceil(TextService:GetTextSize(value, textSize, Enum.Font.BuilderSans, bounds).X)
+        end
+        local suffixText = string.gsub(suffix, "^%s+", "")
+        local suffixWidth = suffixText ~= "" and measureWidth(suffixText) + 1 or 0
+        local suffixGap = suffixWidth > 0 and suffixText ~= suffix and 3 or 0
+        local title = fieldParent:FindFirstChild("Title")
+        local track = frame:FindFirstChild("Button")
+        if track then
+            track.Position = UDim2.new(track.Position.X.Scale, track.Position.X.Offset, topScale, topOffset + fieldHeight + 3)
+        end
+        if title and title:IsA("TextLabel") then
+            title.AutomaticSize = Enum.AutomaticSize.None
+            title.TextTruncate = Enum.TextTruncate.AtEnd
+            title.TextXAlignment = Enum.TextXAlignment.Left
+        end
+
+        local field = Instance.new("Frame")
+        field.Name = "SyllinseSliderValueBox"
+        field.AnchorPoint = Vector2.new(1, 0)
+        field.Position = UDim2.new(rightScale, rightOffset - 1, topScale, topOffset)
+        field.BorderSizePixel = 0
+        field.ZIndex = (nativeValueLabel and nativeValueLabel.ZIndex or frame.ZIndex) + 2
+        setManualCorner(field, SYLLINSE_MANUAL_STYLE.Corners.NumericInput)
+        addStroke(field, Theme.Stroke, 0.08, 1)
 
         local box = Instance.new("TextBox")
         box.Name = "SyllinseNumericSliderInput"
-        box.AnchorPoint = Vector2.new(1, 0)
-        box.Position = UDim2.new(rightScale, valueRightOffset, topScale, topOffset - 1)
-        box.Size = UDim2.fromOffset(editorWidth, fieldHeight)
-        box.BackgroundColor3 = Theme.SurfaceHover
+        box.Position = UDim2.fromOffset(padding, 0)
         box.BackgroundTransparency = 1
         box.BorderSizePixel = 0
         box.ClearTextOnFocus = false
         box.Text = formatNumber(currentValue)
-        box.TextColor3 = nativeValueLabel and nativeValueLabel.TextColor3 or Theme.PanelValue
-        box.TextSize = nativeTextSize
-        box.TextTransparency = nativeValueLabel and nativeValueLabel.TextTransparency or 0
-        box.FontFace = nativeValueLabel and nativeValueLabel.FontFace or FONT_REGULAR
+        box.TextSize = textSize
+        box.FontFace = FONT_REGULAR
         box.TextXAlignment = Enum.TextXAlignment.Right
-        box.TextYAlignment = nativeValueLabel and nativeValueLabel.TextYAlignment or Enum.TextYAlignment.Center
+        box.TextYAlignment = Enum.TextYAlignment.Center
         box.TextWrapped = false
-        box.ZIndex = (nativeValueLabel and nativeValueLabel.ZIndex or frame.ZIndex) + 3
-        box.Parent = fieldParent
-        local editorStroke = Instance.new("UIStroke")
-        editorStroke.Name = "SyllinseNumericSliderFocusStroke"
-        editorStroke.Color = Theme.Stroke
-        editorStroke.Transparency = 1
-        editorStroke.Thickness = 1
-        editorStroke.Parent = box
-        setManualCorner(box, SYLLINSE_MANUAL_STYLE.Corners.NumericInput)
+        box.ZIndex = field.ZIndex + 1
+        box.Parent = field
         numericEditor = box
-        box:SetAttribute("SyllinseNumericSliderInput", true)
 
         if suffixText ~= "" then
             local suffixLabel = Instance.new("TextLabel")
             suffixLabel.Name = "SyllinseNumericSliderSuffix"
             suffixLabel.AnchorPoint = Vector2.new(1, 0)
-            suffixLabel.Position = UDim2.new(rightScale, rightOffset, topScale, topOffset - 1)
+            suffixLabel.Position = UDim2.new(1, -padding, 0, 0)
             suffixLabel.Size = UDim2.fromOffset(suffixWidth, fieldHeight)
             suffixLabel.BackgroundTransparency = 1
             suffixLabel.BorderSizePixel = 0
             suffixLabel.Text = suffixText
-            suffixLabel.TextColor3 = nativeValueLabel and nativeValueLabel.TextColor3 or Theme.PanelSecondary
-            suffixLabel.TextSize = nativeTextSize
-            suffixLabel.TextTransparency = nativeValueLabel and nativeValueLabel.TextTransparency or 0
-            suffixLabel.FontFace = nativeValueLabel and nativeValueLabel.FontFace or FONT_REGULAR
+            suffixLabel.TextSize = textSize
+            suffixLabel.FontFace = FONT_REGULAR
             suffixLabel.TextXAlignment = Enum.TextXAlignment.Left
-            suffixLabel.TextYAlignment = nativeValueLabel and nativeValueLabel.TextYAlignment or Enum.TextYAlignment.Center
+            suffixLabel.TextYAlignment = Enum.TextYAlignment.Center
             suffixLabel.ZIndex = box.ZIndex
-            suffixLabel.Parent = fieldParent
+            suffixLabel.Parent = field
         end
 
+        local function resizeValueBox()
+            local editorWidth = math.clamp(measureWidth(box.Text) + 1, 10, 108)
+            local width = padding * 2 + editorWidth + suffixGap + suffixWidth
+            box.Size = UDim2.fromOffset(editorWidth, fieldHeight)
+            field.Size = UDim2.fromOffset(width, fieldHeight)
+            if title and title:IsA("TextLabel") then
+                title.Size = UDim2.new(rightScale, rightOffset - width - 8, 0, fieldHeight)
+            end
+        end
+        resizeValueBox()
+        box:GetPropertyChangedSignal("Text"):Connect(resizeValueBox)
+        SyllinseRuntime.styleSliderValueBox(field)
+        field.Parent = fieldParent
+
         box.Focused:Connect(function()
-            box.BackgroundTransparency = 0.35
-            editorStroke.Transparency = 0.55
+            SyllinseRuntime.styleSliderValueBox(field)
             task.defer(function()
                 if box.Parent and box:IsFocused() and #box.Text > 0 then
                     box.SelectionStart = 1
@@ -5989,7 +6055,7 @@ SyllinseRuntime.addNumericSlider = function(section, options)
         end)
 
         box.FocusLost:Connect(function()
-            local typed = tonumber(string.match(box.Text or "", "^%s*([+-]?%d+%.?%d*)"))
+            local typed = parseNumericPrefix(box.Text)
             if typed ~= nil then
                 local snapped = snapValue(typed)
                 if control and type(control.Set) == "function" then
@@ -5998,8 +6064,7 @@ SyllinseRuntime.addNumericSlider = function(section, options)
                 end
                 currentValue = tonumber(control and control.Value) or snapped
             end
-            box.BackgroundTransparency = 1
-            editorStroke.Transparency = 1
+            SyllinseRuntime.styleSliderValueBox(field)
             syncEditor(currentValue)
         end)
 
@@ -6671,7 +6736,36 @@ SyllinseRuntime.settingsLeft:Button({
     Callback = function() SyllinseRuntime.notify("Settings", "Notification preferences are active.", "Success") end;
 })
 
-SyllinseRuntime.applyPanelTypography = nil
+local function sliderTrackLift(scale)
+    return math.ceil(3 / scale)
+end
+
+local function sliderCircleDiameter(scale)
+    return math.max(18.5, math.ceil(12 / scale))
+end
+
+SyllinseRuntime.styleSliderThumb = function(thumb)
+    -- Size the visible mark separately from the native thumb's travel.
+    local mark = thumb:FindFirstChild("SyllinseSliderThumbMark")
+    if not mark then
+        mark = Instance.new("Frame")
+        mark.Name = "SyllinseSliderThumbMark"
+        mark.AnchorPoint = Vector2.new(0.5, 0.5)
+        mark.BorderSizePixel = 0
+        mark.ZIndex = thumb.ZIndex
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(1, 0)
+        corner.Parent = mark
+        mark.Parent = thumb
+    end
+    Lumen._SyllinseResponsiveSizing(mark, function(scale, object)
+        local diameter = sliderCircleDiameter(scale)
+        object.Size = UDim2.fromScale(diameter / 16, diameter / 16)
+        object.Position = UDim2.new(0.5, 0, 0.5, -sliderTrackLift(scale))
+    end)
+    mark.BackgroundColor3 = Theme.SliderHandle
+    thumb.BackgroundTransparency = 1
+end
 
 SyllinseRuntime.applyPanelTypography = function(color)
     -- Use a clearer hierarchy: section headings are largest, controls are consistent,
@@ -6767,6 +6861,12 @@ SyllinseRuntime.applyPanelTypography = function(color)
                 -- selection colors, option fonts and shared arrow styling must not
                 -- be overwritten by the general panel pass on theme refresh.
                 if managedDropdown then continue end
+                if descendant:IsA("TextBox") and descendant:GetAttribute("SyllinseFieldText") then continue end
+                if descendant.Name == "SyllinseSliderValueBox" then
+                    SyllinseRuntime.styleSliderValueBox(descendant)
+                    continue
+                end
+                if descendant.Parent and descendant.Parent.Name == "SyllinseSliderValueBox" then continue end
 
                 if descendant:IsA("TextLabel") or descendant:IsA("TextBox") or descendant:IsA("TextButton") then
                     local nativeAlpha = descendant:GetAttribute("SyllinseOriginalTextTransparency")
@@ -6867,11 +6967,11 @@ SyllinseRuntime.applyPanelTypography = function(color)
                     end
                     if name == "button" and descendant.Parent and descendant.Parent.Name == "SliderFrame" then
                         descendant.BackgroundColor3 = Theme.SliderTrack
-                        if touchInputEnabled then
-                            Lumen._SyllinseResponsiveSizing(descendant, function(scale, button)
-                                button.Size = UDim2.new(1, 0, 0, math.ceil(30 / scale))
-                            end)
-                        end
+                        Lumen._SyllinseResponsiveSizing(descendant, function(scale, button)
+                            local height = 2 * (sliderTrackLift(scale) + math.ceil(sliderCircleDiameter(scale) / 2))
+                            if touchInputEnabled then height = math.max(height, math.ceil(30 / scale)) end
+                            button.Size = UDim2.new(1, 0, 0, height)
+                        end)
                     end
                     -- Keep the main toggle target comfortably tappable on mobile.
                     if descendant.Name == "Toggle" then
@@ -6895,6 +6995,10 @@ SyllinseRuntime.applyPanelTypography = function(color)
                     else
                         setNativeTypographySize(descendant, 13, 13)
                         if touchInputEnabled then descendant.FontFace = FONT_MEDIUM end
+                        if Lumen._SyllinseNeutralButtonHover then
+                            local gradient = descendant:FindFirstChildOfClass("UIGradient")
+                            if gradient then gradient.Enabled = false end
+                        end
                         descendant.BackgroundColor3 = Theme.ButtonFill or (Theme.ThemedControls
                             and Theme.Surface:Lerp(Theme.Accent, Theme.Style.ButtonTint) or Theme.Surface)
                         if Theme.ThemedControls then descendant.TextColor3 = Theme.PanelValue end
@@ -7097,7 +7201,7 @@ SyllinseRuntime.applyPanelTypography = function(color)
                         end
                     elseif name == "sliderbar" then
                         descendant.ImageColor3 = Theme.SliderTrack
-                    elseif name ~= "syllinsesliderthumbicon" then
+                    else
                         descendant.ImageColor3 = iconColor
                     end
                 elseif descendant:IsA("Frame") then
@@ -7105,6 +7209,12 @@ SyllinseRuntime.applyPanelTypography = function(color)
                         descendant.BackgroundColor3 = Theme.SliderTrack
                     elseif name == "syllinsesliderrail" then
                         descendant.BackgroundColor3 = Theme.SliderTrack
+                        Lumen._SyllinseResponsiveSizing(descendant, function(scale, rail)
+                            local lift = sliderTrackLift(scale)
+                            local height = math.max(6, math.ceil(5 / scale)) + 2 * lift
+                            rail.Size = UDim2.new(1, 0, 0, height)
+                            rail.Position = UDim2.new(0, 0, 0.5, -lift)
+                        end)
                     elseif name == "overlay" and descendant.Parent and descendant.Parent.Name == "SyllinseSliderRail" then
                         local gradient = descendant:FindFirstChildOfClass("UIGradient")
                         if gradient then
@@ -7118,25 +7228,7 @@ SyllinseRuntime.applyPanelTypography = function(color)
                         descendant.BackgroundColor3 = Theme.SliderHandle
                         if descendant.Parent and descendant.Parent.Name == "Button"
                             and descendant.Parent.Parent and descendant.Parent.Parent.Name == "SliderFrame" then
-                            local asset = SYLLINSE_MANUAL_ICONS.SliderThumbs[SyllinseRuntime.sliderThumbStyle]
-                            local icon = descendant:FindFirstChild("SyllinseSliderThumbIcon")
-                            if asset and not icon then
-                                icon = Instance.new("ImageLabel")
-                                icon.Name = "SyllinseSliderThumbIcon"
-                                icon.BackgroundTransparency = 1
-                                icon.Size = UDim2.fromScale(1, 1)
-                                icon.ScaleType = Enum.ScaleType.Fit
-                                icon.ZIndex = descendant.ZIndex
-                                icon.Parent = descendant
-                                icon:GetPropertyChangedSignal("IsLoaded"):Connect(function()
-                                    descendant.BackgroundTransparency = icon.Visible and icon.IsLoaded and 1 or 0
-                                end)
-                            end
-                            if icon then
-                                icon.Image = asset or ""
-                                icon.Visible = asset ~= nil
-                                descendant.BackgroundTransparency = icon.Visible and icon.IsLoaded and 1 or 0
-                            end
+                            SyllinseRuntime.styleSliderThumb(descendant)
                         end
                     end
                 end
@@ -7250,12 +7342,23 @@ SyllinseRuntime.refreshAppearance = function()
     Theme.SliderFillTop = accent
     Theme.ToggleOffTrack = secondary:Lerp(subtext, 0.28)
     Theme.ToggleOffThumb = subtext:Lerp(text, 0.25)
+    local function sameColor(a, b)
+        return math.abs(a.R - b.R) < 0.5 / 255 and math.abs(a.G - b.G) < 0.5 / 255
+            and math.abs(a.B - b.B) < 0.5 / 255
+    end
+    local preset = SyllinseRuntime.activeAppearancePalette
+    Lumen._SyllinseNeutralButtonHover = preset and preset.NeutralButtonHover == true
+    if preset then
+        Theme.HeaderIconTint = preset.HeaderIconTint or Theme.HeaderIconTint
+        Theme.HeaderTitleTint = preset.HeaderTitleTint or Theme.HeaderTitleTint
+        Theme.SliderTrack = preset.SliderTrack or Theme.SliderTrack
+        if preset.SliderFillBottom and sameColor(accent, preset.Accent) then
+            Theme.SliderFillBottom, Theme.SliderFillTop = preset.SliderFillBottom, preset.SliderFillTop
+            Theme.SliderHandle = preset.SliderHandle
+        end
+    end
     local legacy = (SyllinseRuntime.activeAppearancePreset or "Original") == "Original" and SyllinseRuntime.defaultVisuals
     if legacy then
-        local function sameColor(a, b)
-            return math.abs(a.R - b.R) < 0.5 / 255 and math.abs(a.G - b.G) < 0.5 / 255
-                and math.abs(a.B - b.B) < 0.5 / 255
-        end
         -- Preserve the reference Default hierarchy; explicit custom text colors
         -- retain the direct color-picker behavior used by the other themes.
         if sameColor(text, legacy.Text) then
@@ -7452,19 +7555,6 @@ SyllinseRuntime.initializeAppearance = function()
         Name = "Module Transparency"; Suffix = "%"; Min = 0; Max = 100; Value = 0; Increment = 1;
         Flag = "ThemeModuleTransparency"; Callback = SyllinseRuntime.applyModuleTransparency;
     })
-    local thumbNames = {}
-    for name in pairs(SYLLINSE_MANUAL_ICONS.SliderThumbs) do table.insert(thumbNames, name) end
-    table.sort(thumbNames)
-    table.insert(thumbNames, 1, "Default")
-    SyllinseRuntime.addReptillianDropdown(SyllinseRuntime.settingsRight, {
-        Name = "Slider Thumb", Options = thumbNames, Value = "Default", Flag = "SyllinseSliderThumb",
-        Callback = function(name)
-            local style = SYLLINSE_MANUAL_ICONS.SliderThumbs[name] and name or "Default"
-            if SyllinseRuntime.sliderThumbStyle == style then return end
-            SyllinseRuntime.sliderThumbStyle = style
-            SyllinseRuntime.applyPanelTypography(Theme.PanelText)
-        end,
-    })
     SyllinseRuntime.panelDividerControl = SyllinseRuntime.addReptillianDropdown(SyllinseRuntime.settingsRight, {
         Name = "Panel Divider"; Options = { "Filled", "Line" }; Value = "Filled"; Flag = "ThemePanelDivider";
         Callback = function(value)
@@ -7499,12 +7589,20 @@ SyllinseRuntime.initializeAppearance()
 SyllinseRuntime.initializeAppearance = nil
 
 
--- Native star particles: no media files, conversion jobs or texture uploads.
+-- Native star particles: local artwork and subpixel motion.
+-- SVG theme particle artwork. Generated by work/generate-theme-particle-art.ps1.
+local themeParticleArt = { DotSide = 16 }
+themeParticleArt.Dot = "\000\000\000\000\043\128\179\228\228\179\128\043\000\000\000\000\000\000\005\122\248\255\255\255\255\255\255\248\122\005\000\000\000\005\190\255\255\255\255\255\255\255\255\255\255\190\005\000\000\122\255\255\255\255\255\255\255\255\255\255\255\255\122\000\043\248\255\255\255\255\255\255\255\255\255\255\255\255\248\043\128\255\255\255\255\255\255\255\255\255\255\255\255\255\255\128\179\255\255\255\255\255\255\255\255\255\255\255\255\255\255\179\228\255\255\255\255\255\255\255\255\255\255\255\255\255\255\228\228\255\255\255\255\255\255\255\255\255\255\255\255\255\255\228\179\255\255\255\255\255\255\255\255\255\255\255\255\255\255\179\128\255\255\255\255\255\255\255\255\255\255\255\255\255\255\128\043\248\255\255\255\255\255\255\255\255\255\255\255\255\248\043\000\122\255\255\255\255\255\255\255\255\255\255\255\255\122\000\000\005\190\255\255\255\255\255\255\255\255\255\255\190\005\000\000\000\005\122\248\255\255\255\255\255\255\248\122\005\000\000\000\000\000\000\043\128\179\228\228\179\128\043\000\000\000\000"
+themeParticleArt.Skull = "\137\080\078\071\013\010\026\010\000\000\000\013\073\072\068\082\000\000\000\072\000\000\000\072\008\006\000\000\000\085\237\179\071\000\000\000\001\115\082\071\066\000\174\206\028\233\000\000\000\004\103\065\077\065\000\000\177\143\011\252\097\005\000\000\000\009\112\072\089\115\000\000\014\195\000\000\014\195\001\199\111\168\100\000\000\005\226\073\068\065\084\120\094\237\155\063\136\085\071\020\198\207\060\044\044\054\096\177\197\022\022\022\011\177\176\072\033\104\177\133\144\020\022\066\044\044\044\082\108\105\097\097\177\133\133\133\033\129\045\082\164\072\097\145\194\194\210\050\133\132\004\044\146\160\193\128\133\129\221\160\193\064\002\010\009\172\224\006\003\134\239\075\177\103\244\238\183\051\115\239\222\127\239\109\120\063\216\230\188\115\206\252\189\051\103\206\204\154\205\153\051\103\206\156\057\007\149\160\130\049\032\121\132\228\138\153\157\050\179\101\051\091\050\179\069\051\091\112\149\109\051\251\203\204\158\155\217\031\033\132\031\204\236\126\008\225\185\184\250\255\000\096\025\192\058\128\013\182\004\192\083\000\095\144\124\079\253\031\088\000\092\004\112\087\027\219\021\000\015\000\092\034\121\072\203\060\016\000\056\013\224\129\054\172\111\000\060\006\112\086\203\159\089\072\046\001\184\165\013\025\026\000\119\072\030\211\250\204\020\000\078\002\248\093\043\063\022\000\182\250\158\077\189\237\098\036\087\073\222\008\033\028\214\223\082\144\124\098\102\223\155\217\143\033\132\077\051\123\225\127\070\114\033\132\176\104\102\199\072\158\050\179\149\016\194\009\245\145\130\228\191\102\246\241\100\050\249\084\127\155\026\000\174\232\104\166\000\240\012\192\058\201\227\234\163\014\000\071\073\094\007\240\084\253\166\000\240\185\250\152\010\077\058\199\059\166\183\029\199\119\198\199\090\142\050\245\078\170\235\028\000\175\125\198\028\081\219\174\144\060\012\096\013\192\043\045\183\202\212\058\137\228\010\128\215\090\161\200\016\011\102\138\038\027\003\128\139\106\055\040\036\023\074\107\001\128\013\000\203\106\055\020\030\090\124\167\245\136\248\096\029\085\187\193\000\112\083\043\017\241\245\102\188\202\056\036\143\148\142\049\000\238\170\205\032\000\056\167\133\071\000\252\217\102\135\234\011\159\073\217\153\077\114\085\109\122\007\192\067\045\181\194\121\213\031\027\095\147\146\107\163\239\124\189\236\164\073\072\158\215\066\035\000\110\168\254\180\032\121\085\235\087\097\184\089\148\155\061\062\050\141\034\232\177\168\169\107\255\179\008\192\009\045\172\194\112\163\210\146\154\217\126\078\245\059\003\224\154\022\196\033\071\164\007\010\179\232\075\213\237\012\128\123\090\144\115\085\117\103\005\000\031\105\101\233\161\136\234\118\194\015\138\073\198\012\008\247\139\007\180\201\163\008\128\211\170\159\098\162\130\012\201\028\048\201\205\201\100\242\068\229\179\066\008\097\219\083\042\041\078\170\032\069\211\014\202\005\127\223\170\096\006\249\090\005\206\187\042\072\209\180\131\114\206\126\081\193\012\178\169\002\039\055\232\187\104\218\065\201\108\094\008\225\103\149\041\000\206\002\184\001\224\033\128\071\000\110\182\057\093\183\245\083\168\099\178\077\173\040\156\111\178\073\114\063\060\150\014\181\095\145\092\082\059\165\015\063\106\019\081\189\214\180\233\160\082\163\034\077\078\216\125\248\081\253\136\234\181\102\191\029\004\224\172\042\230\000\112\073\237\035\125\249\081\221\136\234\165\104\186\006\037\041\068\208\031\170\160\064\073\183\244\155\146\212\045\212\177\017\077\059\040\249\104\032\132\144\156\065\102\214\040\008\115\074\186\165\223\148\164\110\110\150\147\076\182\073\105\218\065\191\169\192\010\133\155\217\126\078\246\165\017\238\236\167\048\136\201\054\041\157\058\168\016\031\221\087\065\129\159\084\080\161\179\159\066\134\051\215\166\093\052\237\160\095\085\224\124\160\002\039\023\189\238\033\132\080\210\045\253\182\139\130\159\247\085\224\244\119\068\002\176\172\059\064\036\151\160\247\248\164\136\167\035\146\159\070\164\139\031\191\059\123\169\250\206\025\213\239\068\238\198\000\192\154\234\154\103\000\074\239\130\188\081\185\233\255\134\046\126\000\092\080\125\238\216\108\165\058\180\019\126\067\186\007\143\145\178\133\001\184\004\224\142\223\077\189\244\198\094\045\217\164\104\227\039\151\195\002\112\075\117\059\003\224\180\022\084\097\022\083\174\103\180\146\145\038\103\184\086\020\070\100\099\006\147\246\201\155\086\191\166\206\206\186\078\212\036\194\215\085\127\090\000\184\172\245\139\000\184\162\250\189\065\242\080\238\217\137\095\214\037\051\143\077\032\185\010\224\158\167\051\146\011\127\019\124\081\223\210\250\241\237\226\220\251\075\147\093\228\118\006\190\157\190\197\212\067\010\127\059\164\190\246\061\035\061\007\157\188\201\096\097\199\237\157\082\108\002\224\017\201\248\032\188\022\207\247\236\025\113\127\091\212\248\066\192\103\247\055\234\039\146\139\149\006\161\052\141\185\083\153\219\106\147\131\228\117\181\143\000\184\169\250\057\252\129\121\146\174\159\127\043\252\209\102\137\218\010\249\039\081\234\232\215\133\003\241\027\072\046\170\109\021\000\215\212\102\020\000\124\162\149\137\000\184\160\250\074\233\041\077\004\192\101\181\083\000\156\084\187\072\215\160\176\233\097\053\073\008\225\111\149\217\206\136\254\019\066\200\221\071\085\105\178\086\213\198\087\033\132\077\146\047\084\238\108\171\096\052\252\117\251\030\000\124\166\186\041\252\019\123\166\246\017\063\104\214\126\098\182\083\151\053\181\231\142\143\013\213\029\141\092\174\026\064\227\043\021\146\199\061\254\217\245\232\201\119\157\021\213\207\065\114\161\106\095\069\117\071\035\215\065\185\211\245\144\144\060\172\149\136\168\238\126\232\180\006\229\190\111\146\181\011\116\223\228\202\044\172\077\195\147\219\197\000\188\242\232\184\118\129\237\138\007\136\023\114\137\177\174\187\088\039\074\219\107\196\035\235\235\125\070\177\222\041\107\165\099\069\133\233\062\044\005\112\091\107\148\162\205\217\042\071\233\180\094\197\211\051\189\013\076\043\072\046\250\251\232\034\000\182\212\182\045\077\102\142\063\156\026\125\179\072\226\255\126\153\141\103\034\106\215\022\245\171\120\074\182\255\135\154\093\032\121\044\151\113\140\168\077\091\212\111\021\207\110\214\158\003\167\070\041\119\173\186\109\081\191\145\033\254\187\168\183\127\201\172\002\096\035\132\048\234\247\079\114\123\050\153\188\163\242\174\116\013\020\115\236\231\202\184\047\146\087\207\093\025\170\131\114\215\192\131\081\184\122\158\077\074\105\217\190\025\053\157\218\023\117\087\198\125\081\186\122\062\016\084\175\140\181\113\109\105\122\245\060\103\206\156\153\231\063\065\018\225\194\194\135\185\234\000\000\000\000\073\069\078\068\174\066\096\130"
+themeParticleArt.Moon = "\137\080\078\071\013\010\026\010\000\000\000\013\073\072\068\082\000\000\000\072\000\000\000\072\008\006\000\000\000\085\237\179\071\000\000\000\001\115\082\071\066\000\174\206\028\233\000\000\000\004\103\065\077\065\000\000\177\143\011\252\097\005\000\000\000\009\112\072\089\115\000\000\014\195\000\000\014\195\001\199\111\168\100\000\000\005\237\073\068\065\084\120\094\237\156\079\136\087\085\020\199\207\185\184\112\049\011\023\006\019\014\036\052\011\003\023\006\046\092\024\004\025\206\144\139\022\045\130\010\132\092\184\048\048\016\082\080\016\092\088\020\020\024\184\152\133\011\003\003\003\005\005\013\019\003\133\004\137\004\005\003\013\039\020\026\080\048\080\024\065\249\126\091\252\206\107\158\103\222\125\127\126\191\223\251\253\222\147\247\129\129\031\231\157\251\239\188\123\207\189\247\220\251\070\164\163\163\163\163\163\163\173\168\023\140\002\000\211\034\178\078\068\166\069\228\117\251\061\041\034\087\068\228\162\170\158\086\213\231\062\221\075\013\201\205\000\230\000\060\102\001\000\230\124\250\151\018\000\083\000\246\003\184\237\141\080\130\189\062\191\151\006\146\171\001\028\005\240\204\183\186\044\000\174\249\124\091\015\201\021\000\118\002\120\228\027\092\021\000\139\062\255\086\099\062\230\015\223\208\126\001\112\219\151\049\014\130\023\244\003\128\157\036\047\169\234\006\255\044\011\146\079\073\254\066\242\180\127\150\226\172\023\180\018\000\135\253\219\143\001\224\002\201\237\036\039\044\237\126\175\147\162\148\177\027\139\249\155\227\190\085\030\000\207\000\028\006\048\229\243\136\013\073\000\199\189\110\171\032\185\018\192\037\223\048\143\233\172\243\233\165\151\199\090\175\159\034\051\077\107\000\112\212\183\040\013\128\007\000\062\246\233\210\000\216\229\211\177\151\246\150\215\109\021\230\067\162\216\162\176\176\007\000\248\214\167\101\047\253\033\175\219\026\000\172\207\219\042\000\184\076\114\210\167\203\002\192\041\159\158\189\060\062\240\186\173\128\228\004\128\027\190\065\009\000\078\038\179\083\025\114\028\244\122\175\219\010\098\067\130\189\070\221\168\098\028\233\229\119\215\231\099\172\245\186\141\135\228\036\128\069\223\018\246\140\243\184\159\183\222\022\003\149\090\073\147\252\066\085\087\122\185\136\136\170\126\022\066\184\233\229\003\144\089\078\099\041\232\061\039\188\126\089\098\062\136\228\251\094\119\156\020\246\160\088\239\033\249\092\068\014\120\121\005\174\120\129\209\158\045\134\173\152\051\167\117\000\199\188\126\021\000\236\240\121\210\086\223\094\183\177\144\220\226\027\192\165\253\213\180\215\175\002\201\013\062\223\020\141\113\212\185\067\140\228\059\094\102\252\024\066\184\227\133\085\080\213\235\036\051\243\032\249\169\151\053\146\216\194\176\104\159\085\022\146\123\125\222\236\229\191\216\164\094\148\009\128\041\095\241\020\171\189\126\063\088\080\063\051\110\013\224\148\215\111\020\057\078\244\055\175\059\008\000\142\249\050\018\000\236\247\250\141\129\228\065\095\097\227\160\215\029\004\091\103\197\102\202\103\227\094\023\069\157\052\201\053\094\102\204\123\193\032\168\234\130\136\124\229\229\210\123\182\130\228\073\000\123\252\179\177\099\187\243\101\000\216\230\117\007\197\214\091\151\125\089\105\000\156\040\027\074\201\130\228\042\000\059\000\156\001\112\027\192\041\000\187\188\094\105\114\066\170\155\189\238\048\176\161\118\203\023\150\006\192\035\000\123\170\076\018\102\252\061\177\179\058\139\142\174\240\233\010\201\057\046\174\109\250\037\185\014\192\063\190\064\015\128\069\000\039\237\144\114\099\058\212\066\114\194\022\161\219\173\151\100\250\183\052\000\118\190\088\147\018\140\043\028\097\070\138\189\156\090\200\155\153\163\078\090\068\158\122\129\177\202\011\134\137\170\254\169\170\111\145\188\234\159\213\072\116\131\156\103\160\204\217\138\228\178\243\173\097\163\170\011\170\250\046\201\047\045\106\080\055\015\189\032\033\207\064\247\189\192\168\117\136\037\168\234\147\016\194\062\017\121\131\228\121\255\124\200\068\003\126\121\006\250\219\011\140\215\188\160\078\066\008\119\066\008\179\034\242\038\201\239\072\070\223\118\012\146\079\072\254\064\242\039\255\204\200\220\052\075\158\129\084\053\214\131\162\227\181\078\084\245\122\008\225\115\085\125\149\228\044\201\003\036\079\147\092\072\235\153\049\110\146\060\075\242\123\146\179\170\250\074\008\225\147\156\161\244\151\023\020\002\096\147\247\246\092\218\105\087\058\193\104\010\177\217\017\192\140\215\045\196\046\039\060\240\153\113\136\225\142\081\098\235\165\076\178\046\086\036\228\013\177\231\034\018\187\191\179\213\011\090\192\071\094\032\189\142\112\053\132\016\115\039\249\000\216\230\173\205\158\197\031\147\092\022\200\111\042\005\163\161\250\042\058\161\032\104\223\220\088\141\003\192\135\190\254\092\242\167\131\045\124\099\151\164\108\243\215\247\238\122\084\216\157\130\123\190\254\180\008\129\215\175\076\108\054\163\237\132\189\126\211\040\184\083\080\125\246\202\194\098\049\203\176\227\159\202\231\242\163\194\174\235\196\098\222\209\013\106\101\000\076\231\028\063\223\109\226\080\179\161\117\205\215\055\001\192\038\159\102\032\000\124\237\011\073\176\224\090\245\160\083\077\216\172\117\198\215\051\161\150\111\065\044\100\153\025\149\099\093\133\246\009\128\035\190\126\009\214\134\210\017\201\074\000\152\137\141\105\246\010\063\050\238\158\020\059\140\076\000\176\219\167\025\042\000\118\251\066\211\216\101\241\122\222\080\014\230\115\050\039\147\132\145\221\191\006\048\231\011\079\083\246\166\235\176\032\185\033\182\017\077\000\112\110\100\189\219\156\224\005\095\137\052\022\088\063\060\240\074\053\135\212\137\069\230\012\155\096\179\217\104\035\016\214\165\099\071\067\255\099\151\202\119\013\243\237\153\097\118\151\060\001\185\053\182\101\136\245\164\232\217\122\026\000\247\108\085\187\165\095\099\001\216\104\095\048\022\026\134\075\203\143\129\140\051\148\143\122\109\230\056\164\170\165\026\110\097\211\243\034\242\187\170\206\219\001\193\125\085\125\104\207\039\237\244\100\210\126\111\021\145\025\085\045\221\088\146\223\168\234\190\198\124\028\012\096\091\108\231\063\074\236\090\114\051\111\235\219\241\241\092\222\090\169\078\000\092\026\244\106\224\072\176\077\226\057\223\128\186\048\095\243\182\175\071\227\033\185\005\192\133\186\122\212\040\012\051\020\039\093\004\201\213\118\017\234\061\115\182\125\133\107\073\062\017\145\095\069\228\103\017\057\063\232\069\210\050\140\196\064\105\236\246\197\140\253\059\138\053\118\082\059\037\034\107\085\117\194\116\230\069\228\095\251\155\023\145\005\085\189\040\034\087\084\053\118\103\160\163\163\163\163\163\163\227\005\254\003\228\230\129\200\239\188\209\221\000\000\000\000\073\069\078\068\174\066\096\130"
+themeParticleArt.Ghost = "\137\080\078\071\013\010\026\010\000\000\000\013\073\072\068\082\000\000\000\072\000\000\000\072\008\006\000\000\000\085\237\179\071\000\000\000\001\115\082\071\066\000\174\206\028\233\000\000\000\004\103\065\077\065\000\000\177\143\011\252\097\005\000\000\000\009\112\072\089\115\000\000\014\195\000\000\014\195\001\199\111\168\100\000\000\004\242\073\068\065\084\120\094\237\156\191\107\095\085\020\192\207\009\025\050\100\200\208\033\096\006\193\014\001\051\008\118\232\224\208\049\067\134\130\254\001\025\020\058\056\116\200\224\224\080\232\208\161\131\067\006\007\135\232\032\010\017\116\179\082\161\067\133\012\081\098\081\080\168\160\208\064\035\045\116\168\144\033\229\115\028\122\110\008\135\247\222\125\121\063\190\249\070\239\007\178\156\119\206\121\231\158\239\125\231\222\247\238\189\017\041\020\010\035\162\081\048\009\204\108\222\204\086\085\245\162\153\189\034\034\139\254\183\228\042\007\254\183\047\034\127\139\200\031\170\250\189\170\062\013\174\254\059\000\075\192\053\224\046\112\104\167\004\056\002\238\003\027\192\197\232\255\220\098\102\087\128\123\177\193\125\001\118\205\236\106\188\223\185\001\088\001\190\142\013\027\026\079\254\091\241\254\083\139\153\045\002\091\192\081\108\204\152\248\143\241\106\140\103\170\048\179\101\224\097\012\126\082\000\143\135\238\077\131\141\098\192\170\136\108\171\234\124\188\086\133\153\237\139\200\029\017\121\032\034\007\170\154\070\045\049\179\069\085\093\052\179\069\017\121\093\068\086\085\181\085\097\054\179\023\170\250\158\170\126\026\175\157\025\062\058\101\031\041\239\093\055\128\075\209\071\014\051\091\054\179\015\128\189\232\183\010\224\102\244\113\038\000\215\098\112\017\224\009\112\221\204\102\163\125\023\204\108\029\248\051\222\039\002\220\138\182\019\005\088\109\234\057\062\119\185\101\102\011\209\182\047\102\054\231\115\162\198\057\021\240\110\180\157\008\094\144\159\199\128\018\192\115\096\045\218\013\013\112\217\139\115\037\254\003\094\137\118\163\226\067\121\237\104\229\215\150\163\221\088\120\060\187\049\142\132\063\226\173\138\252\032\000\091\049\136\132\039\231\066\180\025\027\051\155\007\118\098\060\009\224\094\180\025\005\159\033\087\214\029\127\228\038\214\115\034\222\147\030\197\184\018\062\021\025\151\186\215\007\047\200\163\215\156\028\192\165\186\218\008\236\069\253\065\049\179\043\241\166\137\051\031\082\079\144\153\122\172\071\253\193\168\123\043\007\158\140\049\148\119\197\204\102\129\223\098\156\230\053\050\234\015\002\176\020\111\150\000\174\071\253\179\198\204\174\198\056\079\048\232\251\154\072\067\183\245\081\107\144\025\242\208\052\244\248\214\229\096\038\010\026\120\059\010\068\068\084\245\115\085\125\017\229\211\128\170\126\022\101\206\059\081\208\011\159\099\084\078\233\187\188\120\078\010\051\187\016\227\077\180\157\056\182\234\065\254\129\125\174\066\190\063\051\051\243\099\148\079\011\170\250\212\204\126\136\114\167\213\231\218\086\009\106\248\022\115\039\010\166\144\239\162\192\121\045\010\170\104\149\032\095\154\169\226\065\020\076\033\063\071\129\179\024\005\085\180\074\080\131\179\131\040\136\248\156\100\003\216\003\126\049\179\027\093\070\189\030\126\234\098\076\107\112\253\001\238\199\034\231\100\231\019\192\070\052\002\110\071\189\028\093\253\212\205\223\128\071\081\183\051\013\095\239\178\171\008\085\159\072\129\103\081\047\071\031\063\209\046\017\245\170\104\245\209\190\206\153\170\102\237\251\216\158\164\143\159\062\182\109\107\208\255\150\146\160\012\163\039\200\204\126\175\144\253\019\101\057\134\242\115\090\070\079\144\136\124\019\005\034\242\085\020\180\096\040\063\195\019\138\255\049\081\175\010\095\158\217\004\158\249\074\199\150\153\181\090\125\061\073\031\063\049\238\068\212\171\034\091\197\165\231\040\048\013\244\137\127\018\143\216\185\166\036\040\067\073\080\134\146\160\012\037\065\025\074\130\050\148\004\101\040\009\202\080\018\148\161\036\040\067\073\080\134\146\160\012\037\065\025\074\130\050\148\004\101\040\009\202\080\018\148\161\036\040\067\073\080\134\146\160\012\217\143\214\210\241\163\183\239\238\090\023\145\055\069\100\069\068\102\069\228\087\085\253\073\068\190\084\213\191\162\077\019\125\252\117\137\255\084\132\213\146\099\162\094\002\088\243\173\193\149\248\178\077\235\083\056\125\253\069\253\068\212\235\076\116\156\168\208\155\005\062\137\122\117\000\095\052\237\241\025\202\095\212\075\068\189\206\068\199\137\160\051\011\108\071\157\028\110\083\213\168\193\252\069\157\196\073\157\094\212\237\112\077\129\116\109\076\034\054\106\004\127\149\164\235\189\169\059\027\006\172\249\146\112\231\198\036\252\144\204\130\111\057\030\194\223\182\251\090\137\215\236\229\245\163\216\206\206\052\236\088\063\108\042\158\246\082\103\199\204\222\240\099\084\117\091\249\090\147\252\249\137\199\202\184\018\190\142\095\217\251\007\061\179\225\007\114\079\141\039\228\120\131\129\255\162\157\147\052\164\063\224\163\227\006\246\197\031\163\218\131\106\085\196\198\156\240\213\169\081\067\250\243\243\100\117\059\119\187\225\093\186\242\136\081\164\174\049\009\111\212\221\104\087\071\075\127\141\143\091\002\120\012\092\142\062\006\193\204\022\128\111\227\077\019\254\204\111\196\097\182\014\224\253\186\026\097\094\072\129\155\109\253\249\121\250\166\019\208\187\192\112\251\163\171\240\033\248\067\223\204\157\110\124\004\108\118\057\084\231\061\115\019\216\241\025\241\161\055\228\227\046\191\180\153\205\249\127\119\056\078\060\240\016\184\221\212\011\071\193\223\143\038\126\194\185\045\030\223\176\181\166\080\056\021\255\002\211\053\138\086\136\158\211\073\000\000\000\000\073\069\078\068\174\066\096\130"
+themeParticleArt.Flame = "\137\080\078\071\013\010\026\010\000\000\000\013\073\072\068\082\000\000\000\072\000\000\000\072\008\006\000\000\000\085\237\179\071\000\000\000\001\115\082\071\066\000\174\206\028\233\000\000\000\004\103\065\077\065\000\000\177\143\011\252\097\005\000\000\000\009\112\072\089\115\000\000\014\195\000\000\014\195\001\199\111\168\100\000\000\005\102\073\068\065\084\120\094\237\155\063\104\028\071\020\198\103\022\023\042\084\168\080\161\128\010\021\042\092\168\080\225\066\001\067\004\009\196\133\010\023\042\029\112\225\066\001\021\041\092\186\016\164\072\225\066\009\046\092\168\080\225\034\069\012\046\028\112\225\194\133\008\014\184\136\032\001\007\100\112\192\006\043\040\160\128\002\041\004\223\151\098\223\228\142\239\102\103\239\207\238\158\110\117\191\242\221\123\187\051\111\231\239\055\115\206\077\153\050\101\202\148\041\083\070\004\192\054\128\215\000\142\000\124\067\242\138\250\092\074\072\094\001\240\136\002\128\251\234\123\233\032\057\011\224\153\038\135\121\130\254\037\057\175\049\151\006\146\011\000\094\106\098\132\219\026\119\041\176\110\245\074\179\161\000\120\162\177\151\002\000\015\053\025\049\172\155\205\106\124\171\001\112\075\019\145\002\192\166\062\163\181\000\088\006\112\166\073\072\001\224\123\125\078\107\001\240\064\019\016\000\112\164\054\230\246\115\000\203\250\172\214\065\114\222\198\148\030\000\188\182\223\163\173\011\192\190\062\175\117\144\220\209\138\179\051\016\095\077\249\024\171\250\204\086\145\232\066\187\193\135\228\028\128\083\245\097\219\167\124\146\051\090\097\118\090\207\130\248\166\090\209\245\110\223\214\064\114\085\107\202\060\065\175\034\190\169\086\244\150\228\156\198\212\073\166\134\058\008\099\076\132\055\106\240\222\255\237\189\255\078\237\046\255\109\137\100\163\003\118\035\009\114\206\021\173\134\255\081\131\241\045\201\099\053\186\060\073\055\001\108\169\189\046\154\074\080\180\178\206\185\104\119\177\086\244\133\218\187\216\005\176\166\198\137\005\192\154\142\039\204\199\148\211\148\048\102\194\089\020\091\051\181\099\208\038\057\147\088\004\110\168\127\192\118\253\007\026\019\104\085\146\018\194\216\051\245\237\134\228\082\209\172\198\054\037\137\228\109\173\092\000\192\138\250\119\003\096\003\192\185\198\005\000\156\077\252\174\223\186\217\007\173\028\243\010\238\169\191\002\096\179\036\073\231\019\159\036\000\247\180\098\044\088\081\199\104\125\146\082\059\122\146\059\234\031\163\245\073\042\146\091\173\251\205\168\127\012\075\082\081\162\067\146\110\104\220\068\000\096\069\043\020\072\077\249\010\201\235\069\075\007\118\018\062\153\199\070\137\041\255\129\250\166\232\035\073\227\151\072\172\185\031\001\120\011\224\043\253\061\070\145\112\015\224\087\245\045\163\143\036\221\209\152\198\000\176\021\041\208\215\234\167\144\156\215\056\090\183\080\223\126\176\036\069\007\110\075\222\146\198\212\142\233\054\061\235\026\000\239\212\055\134\198\005\212\175\095\000\220\213\103\005\198\162\105\151\040\127\069\250\143\115\121\236\172\006\208\190\182\250\246\075\106\223\102\051\094\084\057\168\133\148\234\199\188\064\183\052\166\027\146\235\026\195\060\238\064\125\007\193\246\109\209\241\008\192\182\250\215\006\128\251\090\128\110\236\024\167\112\077\003\224\133\198\048\143\251\095\192\031\150\162\178\013\051\001\012\133\093\089\041\092\164\005\000\060\213\117\136\197\238\169\111\160\172\229\245\003\201\171\250\220\064\035\034\027\128\027\250\226\034\000\156\000\248\129\228\014\128\071\177\065\061\000\224\068\019\058\044\137\022\122\087\125\043\039\165\242\141\066\149\251\167\216\242\131\249\059\030\170\111\025\195\104\210\215\212\048\042\036\031\103\089\246\088\237\195\226\189\255\093\109\198\192\235\161\097\018\020\157\046\073\030\170\173\031\072\030\122\239\191\084\251\136\252\161\006\163\254\075\016\118\120\023\099\201\110\170\070\167\089\197\086\190\059\041\209\126\020\244\125\180\119\170\095\229\000\120\167\047\102\254\242\069\215\089\139\060\045\074\148\201\163\207\235\190\140\160\239\013\168\095\025\094\013\101\000\120\233\189\239\153\046\073\126\156\101\217\207\221\054\211\154\087\189\247\203\036\223\056\231\014\179\044\251\173\219\167\014\076\157\236\217\215\145\060\206\178\236\035\181\087\010\128\039\250\085\140\155\234\059\046\018\119\001\126\081\223\050\134\025\164\223\171\193\117\190\218\133\128\228\162\218\140\104\217\083\012\147\160\063\213\096\124\174\134\049\242\169\026\140\162\035\240\234\072\108\052\047\204\149\221\162\137\164\145\139\233\038\043\156\232\155\141\177\143\067\137\241\231\188\170\173\076\041\177\063\159\048\047\196\011\245\109\026\000\251\090\046\230\101\027\073\074\025\008\000\155\090\128\046\214\213\191\041\236\030\118\145\244\090\255\070\053\096\178\069\084\048\139\093\171\107\010\083\014\122\176\164\013\188\015\027\137\018\013\184\057\245\206\000\176\161\229\008\084\033\196\013\140\093\070\136\238\203\236\139\125\166\049\117\001\096\037\177\181\057\109\108\112\086\074\174\180\156\052\241\023\002\251\223\089\244\014\054\243\114\220\211\152\070\041\058\073\096\094\184\015\117\014\218\214\114\082\201\057\074\105\227\141\096\095\048\037\165\158\215\113\186\105\151\170\162\221\138\249\123\207\202\046\102\053\006\128\181\162\233\053\096\058\241\200\018\135\077\229\209\217\170\155\042\037\220\074\000\112\071\011\025\195\212\128\129\239\020\146\092\005\176\095\246\033\152\191\163\244\248\123\044\152\162\088\090\001\118\006\241\061\235\042\215\130\224\230\172\219\090\066\054\000\236\038\246\086\061\092\216\228\004\072\174\167\198\164\186\152\168\139\156\000\022\251\249\087\115\085\216\245\155\139\049\032\247\139\237\250\183\235\108\077\000\078\237\098\232\120\167\242\081\032\057\103\039\171\165\199\213\253\098\075\135\221\177\173\144\235\192\214\075\091\000\158\015\147\044\075\202\129\237\001\027\219\120\014\124\170\081\005\118\063\104\195\057\247\137\115\110\193\057\183\232\156\091\240\222\135\163\163\099\147\071\223\059\231\142\189\247\063\057\231\126\244\222\255\165\207\154\050\101\202\068\243\031\114\126\163\249\157\063\099\206\000\000\000\000\073\069\078\068\174\066\096\130"
 SyllinseRuntime.createStarfield = function(parent, shell, screenGui, options)
     options = options or {}
     local snowflakes = options.Snowflakes == true
+    local halloween = options.Halloween == true
     local layer = Instance.new("Frame")
-    layer.Name = snowflakes and "SyllinseSnowflakes" or "SyllinseWhiteStars"
+    layer.Name = snowflakes and "SyllinseSnowflakes" or (halloween and "SyllinseHalloweenParticles" or "SyllinseWhiteStars")
     layer.Size = UDim2.fromScale(1, 1)
     layer.BackgroundTransparency = 1
     layer.BorderSizePixel = 0
@@ -7513,8 +7611,8 @@ SyllinseRuntime.createStarfield = function(parent, shell, screenGui, options)
     layer.Visible = false
     layer.ZIndex = 5
     layer.Parent = parent
-    local state = { Layer = layer, Enabled = false, Opacity = 1, Stars = {}, Sparkles = {}, Particles = {} }
-    local random = Random.new(snowflakes and 251225 or 17311)
+    local state = { Layer = layer, Enabled = false, Opacity = 1, Stars = {}, Sparkles = {}, Particles = {}, Glyphs = {} }
+    local random = halloween and Random.new() or Random.new(snowflakes and 251225 or 17311)
     local elapsed, render = 0, nil
     local scaleModifier = shell:FindFirstChildOfClass("UIScale")
     local connections = {}
@@ -7532,7 +7630,7 @@ SyllinseRuntime.createStarfield = function(parent, shell, screenGui, options)
         part.Parent = owner
         return part
     end
-    -- Precompute a small antialiased circle mask. Moving it blends neighboring
+    -- Resample the SVG dot mask to the current screen scale and blend neighboring
     -- pixel coverage instead of relying on GuiObject subpixel positioning.
     local function circleProfile(diameter, scale, sparkle)
         local radius = diameter * scale * 0.5
@@ -7556,15 +7654,21 @@ SyllinseRuntime.createStarfield = function(parent, shell, screenGui, options)
                 end
             end
         end
-        local function covered(x, y)
-            if not flakeProfile then return x * x + y * y <= radius * radius end
+        local function coverageAt(x, y)
+            if not flakeProfile then
+                local side = themeParticleArt.DotSide
+                local ix = math.floor((x / (radius * 2) + 0.5) * side)
+                local iy = math.floor((y / (radius * 2) + 0.5) * side)
+                if ix < 0 or iy < 0 or ix >= side or iy >= side then return 0 end
+                return string.byte(themeParticleArt.Dot, iy * side + ix + 1) / 255
+            end
             for _, line in ipairs(segments) do
                 local dx, dy = x - line.X, y - line.Y
                 local t = math.clamp((dx * line.DX + dy * line.DY) / line.LengthSquared, 0, 1)
                 local ex, ey = dx - line.DX * t, dy - line.DY * t
-                if ex * ex + ey * ey <= strokeRadius * strokeRadius then return true end
+                if ex * ex + ey * ey <= strokeRadius * strokeRadius then return 1 end
             end
-            return false
+            return 0
         end
         local pad = math.max(0, math.ceil(radius + 0.5) - 1)
         local baseSide, side = pad * 2 + 1, pad * 2 + 2
@@ -7575,7 +7679,7 @@ SyllinseRuntime.createStarfield = function(parent, shell, screenGui, options)
                 for sy = 0, 7 do
                     for sx = 0, 7 do
                         local dx, dy = x - 0.5 + (sx + 0.5) / 8, y - 0.5 + (sy + 0.5) / 8
-                        if covered(dx, dy) then coverage += 1 end
+                        coverage += coverageAt(dx, dy)
                     end
                 end
                 mask[(y + pad) * baseSide + x + pad + 1] = coverage / 64
@@ -7610,6 +7714,7 @@ SyllinseRuntime.createStarfield = function(parent, shell, screenGui, options)
             if not pixel then
                 local node = makePart(star.Point, 1, 1)
                 node.Name = star.Sparkle and "SparkleCoveragePixel" or (snowflakes and "SnowflakeCoveragePixel" or "StarCoveragePixel")
+                node.BackgroundColor3 = star.Point.BackgroundColor3
                 pixel = { Node = node }
                 star.Pixels[key] = pixel
             end
@@ -7623,11 +7728,15 @@ SyllinseRuntime.createStarfield = function(parent, shell, screenGui, options)
     end
     local function populate()
         if #state.Stars > 0 then return end
-        for index = 1, snowflakes and 22 or 54 do
+        local emberColors = halloween and {
+            Color3.fromRGB(255, 108, 24), Color3.fromRGB(220, 167, 55), Color3.fromRGB(159, 113, 204),
+        }
+        for index = 1, snowflakes and 22 or (halloween and 38 or 54) do
             local size = snowflakes and (index % 7 == 0 and 10 or (index % 3 == 0 and 8 or 6))
                 or (index % 11 == 0 and 4 or (index % 5 == 0 and 3 or (index % 2 == 0 and 2 or 1)))
             local point = makePart(layer, size, size)
             point.Name = snowflakes and "Snowflake" or "StarDot"
+            if emberColors then point.BackgroundColor3 = emberColors[(index - 1) % #emberColors + 1] end
             local particle = {
                 Point = point,
                 X = random:NextNumber(), Y = random:NextNumber(),
@@ -7639,6 +7748,44 @@ SyllinseRuntime.createStarfield = function(parent, shell, screenGui, options)
             }
             state.Stars[#state.Stars + 1] = particle
             state.Particles[#state.Particles + 1] = particle
+        end
+        if halloween and options.ResolveImages then
+            local images, dispose = options.ResolveImages()
+            state.DisposeImages = dispose
+            local shapes = {
+                { Name = "Skull", Color = Color3.fromRGB(151, 125, 182) },
+                { Name = "Moon", Color = Color3.fromRGB(202, 157, 63) },
+                { Name = "Ghost", Color = Color3.fromRGB(139, 114, 177) },
+                { Name = "Flame", Color = Color3.fromRGB(223, 121, 49) },
+            }
+            local glyphCount = #shapes * 3
+            for index = 1, glyphCount do
+                local shape = shapes[(index - 1) % #shapes + 1]
+                local asset = images[shape.Name]
+                if not asset then continue end
+                local size = math.round(random:NextNumber(15, 22))
+                local icon = Instance.new("ImageLabel")
+                icon.Name = "Halloween" .. shape.Name
+                icon.BackgroundTransparency = 1
+                icon.AnchorPoint = Vector2.new(0.5, 0.5)
+                icon.Size = UDim2.fromOffset(size, size)
+                icon.ScaleType = Enum.ScaleType.Fit
+                icon.ResampleMode = Enum.ResamplerMode.Default
+                icon.ImageColor3 = shape.Color
+                if asset.Uri then icon.Image = asset.Uri else icon.ImageContent = asset.Content end
+                icon.Active = false
+                icon.Visible = false
+                icon.Parent = layer
+                local glyph = {
+                    Point = icon, Glyph = true, Radius = size * math.sqrt(0.5), Diameter = size,
+                    X = random:NextNumber(0.1, 0.9), Y = random:NextNumber(0.08, 0.92),
+                    Heading = (index - 1) / glyphCount * math.pi * 2 + random:NextNumber(-0.2, 0.2),
+                    Speed = random:NextNumber(0.008, 0.017), MotionSeed = random:NextNumber(0, 500),
+                    Brightness = random:NextNumber(0.35, 0.64),
+                }
+                state.Glyphs[#state.Glyphs + 1] = glyph
+                state.Particles[#state.Particles + 1] = glyph
+            end
         end
         if options.Sparkles then
             for index = 1, 4 do
@@ -7671,8 +7818,37 @@ SyllinseRuntime.createStarfield = function(parent, shell, screenGui, options)
         local radius = math.clamp(SYLLINSE_MANUAL_STYLE.Corners.Window, 0, math.min(width, height) * 0.5)
         local halfWidth, halfHeight = width * 0.5, height * 0.5
         for _, star in ipairs(state.Particles) do
-            local x, y = (star.X + elapsed * star.Drift) % 1, (star.Y - elapsed * star.Rise) % 1
+            local x, y = star.X, star.Y
+            if star.Glyph then
+                -- Bias glyphs lower while keeping the top and bottom wrap points fixed.
+                y += 0.22 * math.sin(math.pi * y)
+            else
+                x, y = (x + elapsed * star.Drift) % 1, (y - elapsed * star.Rise) % 1
+            end
             star.RenderX, star.RenderY = x, y
+            -- Distance inside the rounded shell, including each dot's full radius.
+            -- Fade before the boundary so wrapping never pops across an edge.
+            local qx = math.abs(x * width - halfWidth) - (halfWidth - radius)
+            local qy = math.abs(y * height - halfHeight) - (halfHeight - radius)
+            local dx, dy = math.max(qx, 0), math.max(qy, 0)
+            local clearance = radius - math.sqrt(dx * dx + dy * dy) - math.min(math.max(qx, qy), 0)
+            local fade = math.clamp((clearance - star.Radius - 3 / scale) / 12, 0, 1)
+            fade = fade * fade * (3 - 2 * fade)
+            local alpha = star.Brightness * state.Opacity * fade
+            if star.Sparkle then
+                -- One slow, smooth glint followed by a longer quiet interval.
+                local phase = (elapsed / star.Period + star.Phase) % 1
+                alpha *= phase < 0.25 and math.sin(math.pi * phase / 0.25) ^ 2 or 0
+            end
+            star.Alpha = alpha
+            star.Point.Visible = alpha > 0.001
+            if star.Glyph then
+                if star.Point.Visible then
+                    star.Point.Position = UDim2.fromScale(x, y)
+                    star.Point.ImageTransparency = 1 - alpha
+                end
+                continue
+            end
             local key = star.Sparkle and ("sparkle:" .. star.Diameter) or star.Diameter
             local profile = profiles[key]
             if not profile then
@@ -7694,22 +7870,6 @@ SyllinseRuntime.createStarfield = function(parent, shell, screenGui, options)
             star.PixelX, star.PixelY = originX, originY
             star.DrawLeft, star.DrawTop = absoluteX, absoluteY
             star.DrawWidth, star.DrawHeight, star.DrawSide = absoluteWidth, absoluteHeight, profile.Side
-            -- Distance inside the rounded shell, including each dot's full radius.
-            -- Fade before the boundary so wrapping never pops across an edge.
-            local qx = math.abs(x * width - halfWidth) - (halfWidth - radius)
-            local qy = math.abs(y * height - halfHeight) - (halfHeight - radius)
-            local dx, dy = math.max(qx, 0), math.max(qy, 0)
-            local clearance = radius - math.sqrt(dx * dx + dy * dy) - math.min(math.max(qx, qy), 0)
-            local fade = math.clamp((clearance - star.Radius - 3 / scale) / 12, 0, 1)
-            fade = fade * fade * (3 - 2 * fade)
-            local alpha = star.Brightness * state.Opacity * fade
-            if star.Sparkle then
-                -- One slow, smooth glint followed by a longer quiet interval.
-                local phase = (elapsed / star.Period + star.Phase) % 1
-                alpha *= phase < 0.25 and math.sin(math.pi * phase / 0.25) ^ 2 or 0
-            end
-            star.Alpha = alpha
-            star.Point.Visible = alpha > 0.001
             if star.Point.Visible then
                 local wa, wb, wc, wd = (1 - fx) * (1 - fy), fx * (1 - fy), (1 - fx) * fy, fx * fy
                 for _, pixel in ipairs(star.ActivePixels) do
@@ -7737,6 +7897,14 @@ SyllinseRuntime.createStarfield = function(parent, shell, screenGui, options)
                 render = game:GetService("RunService").RenderStepped:Connect(function(delta)
                     local step = math.clamp(delta, 0, 0.1)
                     elapsed += step
+                    for _, glyph in ipairs(state.Glyphs) do
+                        -- Independent smooth turns let each glyph wander across the shell.
+                        local turn = math.noise(glyph.MotionSeed, elapsed * 0.1)
+                        glyph.Heading += turn * step * 0.8
+                        local distance = glyph.Speed * step
+                        glyph.X = (glyph.X + math.cos(glyph.Heading) * distance) % 1
+                        glyph.Y = (glyph.Y + math.sin(glyph.Heading) * distance) % 1
+                    end
                     draw()
                     if options.Mist then options.Mist:Step(step) end
                 end)
@@ -7768,6 +7936,8 @@ SyllinseRuntime.createStarfield = function(parent, shell, screenGui, options)
         table.clear(state.Stars)
         table.clear(state.Sparkles)
         table.clear(state.Particles)
+        table.clear(state.Glyphs)
+        if state.DisposeImages then state.DisposeImages() end
         if options.Mist then options.Mist:Destroy() end
     end)
     return state
@@ -9655,6 +9825,52 @@ return {
 
     -- Reuse the bundled codec once for the six original tab shapes; masks are cached.
     tabIconAssets:Start(backgroundPngCodec)
+    local halloweenParticles = SyllinseRuntime.createStarfield(mediaViewport, root, gui, {
+        Halloween = true,
+        ResolveImages = function()
+            local images, editables = {}, {}
+            local register = type(getcustomasset) == "function" and getcustomasset or getsynasset
+            for _, name in ipairs({ "Skull", "Moon", "Ghost", "Flame" }) do
+                local bytes = themeParticleArt[name]
+                local loaded, uri = pcall(function()
+                    assert(type(register) == "function", "Local images unavailable")
+                    for _, folder in ipairs({ "Syllinse", "Syllinse/Icons" }) do
+                        if not isfolder(folder) then makefolder(folder) end
+                    end
+                    local path = "Syllinse/Icons/halloween-v1-" .. string.lower(name) .. ".png"
+                    local cached, previous = pcall(readfile, path)
+                    if not cached or previous ~= bytes then writefile(path, bytes) end
+                    return register(path)
+                end)
+                if loaded and type(uri) == "string" and uri ~= "" then
+                    images[name] = { Uri = uri }
+                else
+                    local editable
+                    local ok, content = pcall(function()
+                        local decoded = backgroundPngCodec.decode(buffer.fromstring(bytes))
+                        local size = Vector2.new(decoded.width, decoded.height)
+                        editable = assert(game:GetService("AssetService"):CreateEditableImage({ Size = size }))
+                        editable:WritePixelsBuffer(Vector2.zero, size, decoded.pixels)
+                        return Content.fromObject(editable)
+                    end)
+                    if ok then
+                        images[name] = { Content = content }
+                        editables[#editables + 1] = editable
+                    elseif editable then
+                        editable:Destroy()
+                    end
+                end
+            end
+            return images, function()
+                for _, editable in ipairs(editables) do editable:Destroy() end
+            end
+        end,
+    })
+    local function syncThemeParticles(preset)
+        starfield:SetEnabled(preset.Starfield == true)
+        snowfall:SetEnabled(preset.Snowfall == true)
+        halloweenParticles:SetEnabled(preset.HalloweenParticles == true)
+    end
 
     -- Bundled GIF decoder from https://github.com/Egor-Skriptunoff/pure_lua_GIF
 --[=[
@@ -11462,6 +11678,7 @@ return open_gif
 
     local function extraColors(name)
         local preset = presets[name]
+        SyllinseRuntime.activeAppearancePalette = name ~= "Original" and preset or nil
         if name == "Original" then
             for key, value in pairs(defaults) do Theme[key] = value end
         end
@@ -11555,10 +11772,10 @@ return open_gif
         local preset = presets[name]
         local url = preset.Media or preset.Video or preset.Photo
         starfield:SetOpacity(backgroundOpacity / 100)
-        starfield:SetEnabled(preset.Starfield == true)
         snowfall:SetOpacity(backgroundOpacity / 100)
-        snowfall:SetEnabled(preset.Snowfall == true)
-        if (preset.Starfield or preset.Snowfall) and not customBackground then
+        halloweenParticles:SetOpacity(backgroundOpacity / 100)
+        syncThemeParticles(preset)
+        if (preset.Starfield or preset.Snowfall or preset.HalloweenParticles) and not customBackground then
             if activeBackgroundLoad then activeBackgroundLoad:Cancel() end
             stopAnimation()
             photo.Image, photo.Visible = "", false
@@ -11675,7 +11892,9 @@ return open_gif
         Lumen.SetFlag("ThemePanelDivider", preset.PanelDivider or initial.PanelDivider)
         SyllinseRuntime.appearanceBatch = false
         refreshSurfaces()
-        if (preset.Starfield or preset.Snowfall) and SyllinseRuntime.useThemeBackground then SyllinseRuntime.useThemeBackground() end
+        if (preset.Starfield or preset.Snowfall or preset.HalloweenParticles) and SyllinseRuntime.useThemeBackground then
+            SyllinseRuntime.useThemeBackground()
+        end
     end
     -- Restore metadata without overwriting a config's independently saved color flags.
     Lumen.RegisterFlag("SyllinseThemePreset", {
@@ -11918,6 +12137,8 @@ return open_gif
             backgroundOpacity = math.clamp(tonumber(value) or 65, 0, 100)
             mediaViewport.Visible = backgroundEnabled and backgroundOpacity > 0
             starfield:SetOpacity(backgroundOpacity / 100)
+            snowfall:SetOpacity(backgroundOpacity / 100)
+            halloweenParticles:SetOpacity(backgroundOpacity / 100)
             photo.ImageTransparency = backgroundTransparency(0)
             if activePool and activePool.VisibleImage then activePool.VisibleImage.ImageTransparency = backgroundTransparency(0) end
             if nativeVideo then nativeVideo.Display.VideoTransparency = backgroundTransparency(0) end
@@ -11963,8 +12184,7 @@ return open_gif
     end
 
     SyllinseRuntime.refreshThemeBackdrop = function()
-        starfield:SetEnabled(presets[selected].Starfield == true)
-        snowfall:SetEnabled(presets[selected].Snowfall == true)
+        syncThemeParticles(presets[selected])
         if not customBackground then refreshMedia(false) end
     end
     SyllinseRuntime.useThemeBackground = function()
@@ -11972,8 +12192,7 @@ return open_gif
         Lumen.SetFlag("SyllinseBackgroundEnabled", true)
         Lumen.SetFlag("SyllinseBackgroundOpacity", 100)
         if customBackground then
-            starfield:SetEnabled(presets[selected].Starfield == true)
-            snowfall:SetEnabled(presets[selected].Snowfall == true)
+            syncThemeParticles(presets[selected])
         else
             setBackgroundUrl("", false)
         end
