@@ -220,10 +220,11 @@ end
 -- ================================================================
 local SYLLINSE_MANUAL_ICONS = {
     SettingsTab = "rbxassetid://76254758372811", -- left navigation Settings icon
+    SliderThumbs = {}, -- Map dropdown names to rbxassetid:// image URIs.
     Settings = { -- keybind/settings gear beside each control
         Image = "rbxassetid://133013236590645",
-        DesktopSize = 22,
-        TouchSize = 23,
+        RowOrder = 2,
+        ArtworkScale = 0.95, -- This image has extra transparent padding.
         -- Idle tint uses Theme.Muted, shared with the bell's inactive state.
         -- These are the only two custom highlight options.
         HoverColor = Color3.fromRGB(184, 182, 182),
@@ -231,8 +232,8 @@ local SYLLINSE_MANUAL_ICONS = {
     },
     NotificationBell = { -- inline notification bell
         Image = "rbxassetid://10709775704",
-        DesktopSize = 20,
-        TouchSize = 26,
+        RowOrder = 1,
+        ArtworkScale = 0.85,
     },
     Appearance = { -- Appearance section's palette/color icon
         Image = "", -- optional custom palette/color icon; blank keeps Lumen's native icon
@@ -240,8 +241,10 @@ local SYLLINSE_MANUAL_ICONS = {
     },
     ColorSwatch = {
         DesktopSize = 20,
-        TouchSize = 30,
-        CornerRadius = 12,
+        TouchSize = 24,
+        CornerRadius = 50,
+        RowOrder = 3,
+        ArtworkScale = 0.83,
     },
 }
 
@@ -439,24 +442,29 @@ local uiScale = Instance.new("UIScale")
 uiScale.Name = "ResponsiveScale"
 uiScale.Parent = root
 
--- One root UIScale handles responsive sizing and the subtle, centered open/close motion.
+-- One root UIScale handles responsive sizing and the centered window transition.
 local responsiveScaleValue = 1
 -- Use a normal 100% maximum. updateScale() automatically reduces it only when
 -- the actual safe viewport cannot fit the current shell.
 local windowSizePercent = 100
 local windowSizeMultiplier = 1.0
 local compactTouchLayout = false
+local responsiveWindowSize = baseWindowSize
+local mobileSafeOffsetX = 0
 local mobileSafeOffsetY = 0
 -- Once manually dragged, preserve the shell position across close/open cycles.
 local windowHasCustomPosition = false
 local layoutResponsiveShell
-local windowMotionFactor = Instance.new("NumberValue")
-windowMotionFactor.Name = "WindowMotionFactor"
-windowMotionFactor.Value = 0.90
-windowMotionFactor.Changed:Connect(function(value)
-    -- Keep the open/close motion layered on top of the current responsive size.
-    uiScale.Scale = responsiveScaleValue * value
-end)
+local windowScaleTween
+local resizeResponsiveControls
+local function getWindowSafeBounds(viewport)
+    local start, finish = GuiService:GetGuiInset()
+    local guiStart = gui.AbsolutePosition
+    local guiSize = gui.AbsoluteSize
+    local guiEnd = guiSize.X > 0 and guiSize.Y > 0 and guiStart + guiSize or viewport
+    return Vector2.new(math.max(start.X, guiStart.X), math.max(start.Y, guiStart.Y)),
+        Vector2.new(math.min(viewport.X - finish.X, guiEnd.X), math.min(viewport.Y - finish.Y, guiEnd.Y))
+end
 root.Visible = false -- shown by the initial Syllinse-branded opening transition near the end
 
 -- Scale the visible Syllinse/Lumen shell with one root UIScale, matching Lumen's
@@ -528,11 +536,11 @@ local function setNativeGeometryScale(targetScale)
     -- offsets/sizes: Lumen uses UIListLayout and AutomaticSize to place its controls.
     targetScale = math.clamp(targetScale, 0.001, 1.5)
     nativeGeometryScale = targetScale -- retained for separately-rendered Lumen popups
-    uiScale.Scale = targetScale * windowMotionFactor.Value
+    if not windowScaleTween then uiScale.Scale = targetScale end
 end
 
 local function refreshNativeResponsiveLayout()
-    root.Size = baseWindowSize
+    root.Size = responsiveWindowSize
     setNativeGeometryScale(responsiveScaleValue)
     if layoutResponsiveShell then
         layoutResponsiveShell()
@@ -552,20 +560,7 @@ local function updateScale(preserveWindowPosition)
     -- Read all four safe-area insets. The previous calculation only used the
     -- vertical values, which could leave the shell offset or clipped on devices
     -- with asymmetric cutouts / rounded display edges.
-    local safeLeft, safeTop, safeRight, safeBottom = 0, 0, 0, 0
-    local okInset, topLeft, bottomRight = pcall(function()
-        return GuiService:GetGuiInset()
-    end)
-    if okInset then
-        if typeof(topLeft) == "Vector2" then
-            safeLeft = math.max(0, topLeft.X)
-            safeTop = math.max(0, topLeft.Y)
-        end
-        if typeof(bottomRight) == "Vector2" then
-            safeRight = math.max(0, bottomRight.X)
-            safeBottom = math.max(0, bottomRight.Y)
-        end
-    end
+    local safeStart, safeEnd = getWindowSafeBounds(viewport)
 
     local touchDevice = touchInputEnabled
     -- Use the maximum safe display area. Keep only a 4px mobile edge gap so the
@@ -573,70 +568,37 @@ local function updateScale(preserveWindowPosition)
     local horizontalMargin = touchDevice and 4 or 18
     local verticalMargin = touchDevice and 4 or 18
     local availableWidth = math.max(1,
-        viewport.X - safeLeft - safeRight - horizontalMargin * 2)
+        safeEnd.X - safeStart.X - horizontalMargin * 2)
     local availableHeight = math.max(1,
-        viewport.Y - safeTop - safeBottom - verticalMargin * 2)
+        safeEnd.Y - safeStart.Y - verticalMargin * 2)
 
-    -- Find the largest proportional scale that fits in both dimensions:
-    -- no stretching and no top/bottom/side cropping.
-    local fittedScale = math.min(availableWidth / baseWindowSize.X.Offset, availableHeight / baseWindowSize.Y.Offset)
-    -- The UI scale slider now maps directly to the actual scale:
-    -- 100 means the original authored size, with no hidden enlargement factor.
+    -- Fit the phone canvas to its viewport before applying the user's scale.
+    -- This lets ordinary phone sizes render text at native size at 100%.
+    compactTouchLayout = touchDevice and (availableWidth < 700 or availableWidth < availableHeight * 1.15)
+    if touchDevice then
+        local width = math.clamp(math.floor(availableWidth), 360, baseWindowSize.X.Offset)
+        local heightLimit = compactTouchLayout and math.min(800, math.floor(width * 1.8)) or 520
+        local height = math.clamp(math.floor(availableHeight), 280, heightLimit)
+        responsiveWindowSize = UDim2.fromOffset(width, height)
+    else
+        responsiveWindowSize = baseWindowSize
+    end
+    local fittedScale = math.min(1, availableWidth / responsiveWindowSize.X.Offset,
+        availableHeight / responsiveWindowSize.Y.Offset)
     local requestedScale = math.min(windowSizeMultiplier, 1.0)
-    responsiveScaleValue = math.max(0.001, math.min(fittedScale, requestedScale))
+    responsiveScaleValue = math.max(0.001, touchDevice
+        and fittedScale * requestedScale or math.min(fittedScale, requestedScale))
     refreshNativeResponsiveLayout()
+    if resizeResponsiveControls then resizeResponsiveControls() end
 
     -- Only viewport/orientation updates are allowed to reposition the shell.
     -- Editing UI scale leaves root.Position byte-for-byte unchanged.
     if not preserveWindowPosition then
-        mobileSafeOffsetY = math.floor((safeTop - safeBottom) / 2)
-        local safeOffsetX = math.floor((safeLeft - safeRight) / 2)
+        local safeOffset = (safeStart + safeEnd - gui.AbsoluteSize) * 0.5 - gui.AbsolutePosition
+        mobileSafeOffsetX = math.round(safeOffset.X)
+        mobileSafeOffsetY = math.round(safeOffset.Y)
         if not windowHasCustomPosition then
-            root.Position = UDim2.fromOffset(
-                viewport.X * 0.5 + safeOffsetX,
-                viewport.Y * 0.5 + mobileSafeOffsetY
-            )
-        end
-    end
-
-    uiScale.Scale = responsiveScaleValue * windowMotionFactor.Value
-
-    -- Preserve the existing touch-friendly switch target without changing the
-    -- dimensions of any other control or panel.
-    local switchCompensationScale = responsiveScaleValue < 1
-        and (1 / math.max(responsiveScaleValue, 0.25)) or 1
-    for _, switchTrack in ipairs(gui:GetDescendants()) do
-        if switchTrack:IsA("GuiButton") and switchTrack.Name == "Toggle"
-            and switchTrack:GetAttribute("SyllinseBaseSwitchWidth") then
-            local switchScale = switchTrack:FindFirstChild("SyllinseSwitchScaleCompensation")
-            if switchScale and switchScale:IsA("UIScale") then
-                switchScale.Scale = switchCompensationScale
-            end
-
-            local switchRow = switchTrack.Parent
-            while switchRow and switchRow ~= root do
-                if switchRow.Name == "LabelFrame" then
-                    local baseHeight = switchRow:GetAttribute("SyllinseToggleBaseRowHeight")
-                    if type(baseHeight) == "number" and switchRow.Size.Y.Scale == 0 then
-                        local requestedLabelSize = tonumber(SYLLINSE_MANUAL_STYLE.Switch.LabelTextSize)
-                            or (SYLLINSE_MANUAL_STYLE.Switch.Height - 2)
-                        local minimumPhysicalHeight = math.max(
-                            SYLLINSE_MANUAL_STYLE.Switch.RowMinHeight,
-                            SYLLINSE_MANUAL_STYLE.Switch.Height + SYLLINSE_MANUAL_STYLE.Switch.RowPadding,
-                            requestedLabelSize + SYLLINSE_MANUAL_STYLE.Switch.RowPadding
-                        )
-                        local targetHeight = math.max(
-                            baseHeight, minimumPhysicalHeight / math.max(responsiveScaleValue, 0.25))
-                        switchRow.Size = UDim2.new(
-                            switchRow.Size.X.Scale, switchRow.Size.X.Offset,
-                            0, math.ceil(targetHeight)
-                        )
-                        switchRow.ClipsDescendants = false
-                    end
-                    break
-                end
-                switchRow = switchRow.Parent
-            end
+            root.Position = UDim2.new(0.5, mobileSafeOffsetX, 0.5, mobileSafeOffsetY)
         end
     end
 
@@ -645,31 +607,30 @@ local function updateScale(preserveWindowPosition)
     if windowHasCustomPosition and not preserveWindowPosition then
         task.defer(function()
             if not root.Parent then return end
-            local activeCamera = Workspace.CurrentCamera
-            local viewportNow = activeCamera and activeCamera.ViewportSize or gui.AbsoluteSize
-            local currentSize = root.AbsoluteSize
+            local currentSize = Vector2.new(responsiveWindowSize.X.Offset, responsiveWindowSize.Y.Offset)
+                * responsiveScaleValue
             local margin = touchDevice and 4 or 18
-            local minX = safeLeft + currentSize.X / 2 + margin
-            local maxX = viewportNow.X - safeRight - currentSize.X / 2 - margin
-            local minY = safeTop + currentSize.Y / 2 + margin
-            local maxY = viewportNow.Y - safeBottom - currentSize.Y / 2 - margin
-            local cx = viewportNow.X * root.Position.X.Scale + root.Position.X.Offset
-            local cy = viewportNow.Y * root.Position.Y.Scale + root.Position.Y.Offset
+            local minX = safeStart.X + currentSize.X / 2 + margin
+            local maxX = safeEnd.X - currentSize.X / 2 - margin
+            local minY = safeStart.Y + currentSize.Y / 2 + margin
+            local maxY = safeEnd.Y - currentSize.Y / 2 - margin
+            local cx = gui.AbsolutePosition.X + gui.AbsoluteSize.X * root.Position.X.Scale + root.Position.X.Offset
+            local cy = gui.AbsolutePosition.Y + gui.AbsoluteSize.Y * root.Position.Y.Scale + root.Position.Y.Offset
             if maxX < minX then
-                cx = (safeLeft + viewportNow.X - safeRight) / 2
+                cx = (safeStart.X + safeEnd.X) / 2
             else
                 cx = math.clamp(cx, minX, maxX)
             end
             if maxY < minY then
-                cy = (safeTop + viewportNow.Y - safeBottom) / 2
+                cy = (safeStart.Y + safeEnd.Y) / 2
             else
                 cy = math.clamp(cy, minY, maxY)
             end
             root.Position = UDim2.new(
                 root.Position.X.Scale,
-                cx - viewportNow.X * root.Position.X.Scale,
+                cx - gui.AbsolutePosition.X - gui.AbsoluteSize.X * root.Position.X.Scale,
                 root.Position.Y.Scale,
-                cy - viewportNow.Y * root.Position.Y.Scale
+                cy - gui.AbsolutePosition.Y - gui.AbsoluteSize.Y * root.Position.Y.Scale
             )
         end)
     end
@@ -750,7 +711,7 @@ local SIDEBAR_WIDTH = 77
 local NAV_BUTTON_SIZE = 55
 -- Center the full 55px tab hitbox inside the 77px sidebar.
 local NAV_BUTTON_X = (SIDEBAR_WIDTH - NAV_BUTTON_SIZE) / 2
-local NAV_ROW_HEIGHT = 68
+local NAV_ROW_HEIGHT = touchInputEnabled and 72 or 68
 
 local navItems = {
     -- User-tuned sidebar icon sizes; the image artwork is centered in each 55px button.
@@ -1383,7 +1344,7 @@ local function setActiveTab(name)
     if headerTitle then
         headerTitle.Text = name
         -- Keep a small, consistent gap from the visible icon; set per category in navItems.
-        headerTitle.Position = UDim2.fromOffset(found and found.HeaderTitleX or 51, 19)
+        headerTitle.Position = UDim2.fromOffset(touchInputEnabled and 48 or (found and found.HeaderTitleX or 51), 19)
     end
     updateHeaderIcon(name)
     if headerGear and found then
@@ -1489,7 +1450,8 @@ for itemIndex, item in ipairs(navItems) do
         -- Larger fitted image artwork is centered inside the 55px tap target.
         icon = makeImageIcon(
             item.Name .. "Icon", button, item.IconId, item.IconSize or 34,
-            UDim2.new(0.5, item.IconOffsetX or 0, 0.5, item.IconOffsetY or 0),
+            touchInputEnabled and UDim2.fromScale(0.5, 0.5)
+                or UDim2.new(0.5, item.IconOffsetX or 0, 0.5, item.IconOffsetY or 0),
             Vector2.new(0.5, 0.5), 3, nil, item.IconSize or 38
         )
         icon.ImageColor3 = Theme.Muted
@@ -1509,13 +1471,11 @@ for itemIndex, item in ipairs(navItems) do
     -- Optional labels sit directly below each tab without overlapping the next row.
     local terminologyLabelPositionY = navRowY + navTapSize - 1
     terminologyLabel.Position = UDim2.fromOffset(38.5, terminologyLabelPositionY)
-    terminologyLabel.Size = UDim2.fromOffset(77, 13)
+    terminologyLabel.Size = UDim2.fromOffset(77, touchInputEnabled and 16 or 13)
     terminologyLabel.FontFace = FONT_BOLD
     terminologyLabel.Text = item.Name
-    -- A slightly larger native-size glyph is easier to read than shrinking 13px text.
-    -- TextScaled remains off so Roblox does not auto-fit and resample the lettering.
     terminologyLabel.TextScaled = false
-    terminologyLabel.TextSize = 11
+    terminologyLabel.TextSize = touchInputEnabled and 13 or 11
     terminologyLabel.RichText = false
     terminologyLabel.AutoLocalize = false
     terminologyLabel.TextColor3 = Theme.IconIdle
@@ -1670,7 +1630,8 @@ for _, item in ipairs(navItems) do
         local holder = makeFrame(
             "HeaderIconHolder_" .. item.Name, header,
             UDim2.fromOffset(44, 44),
-            UDim2.fromOffset(item.HeaderIconX or 6, item.HeaderIconY or 15), Theme.Root, 1
+            touchInputEnabled and UDim2.new(0, 6, 0.5, -22)
+                or UDim2.fromOffset(item.HeaderIconX or 6, item.HeaderIconY or 15), Theme.Root, 1
         )
         holder.ZIndex = 3
         holder.ClipsDescendants = false
@@ -1820,13 +1781,12 @@ do
 end
 
 -- Centered open/close animation. The outer shell surface stays opaque; the interior content and sweep animate independently.
-local motionBody = Instance.new("CanvasGroup")
+local motionBody = Instance.new("Frame")
 motionBody.Name = "WindowMotionBody"
 motionBody.Size = UDim2.fromScale(1, 1)
 motionBody.Position = UDim2.fromScale(0, 0)
 motionBody.BackgroundTransparency = 1
 motionBody.BorderSizePixel = 0
-motionBody.GroupTransparency = 0
 motionBody.ZIndex = 1
 motionBody.Parent = root
 
@@ -1889,14 +1849,6 @@ launcherGlowViolet.Visible = showLauncherButton
 local launcher = Instance.new("TextButton")
 launcher.Name = "SyllinseOpenButton"
 launcher.AnchorPoint = Vector2.new(0.5, 0.5)
--- Start the launcher just above the shell instead of in the middle of its controls.
--- Once the user drags it, its saved position is left untouched by window transitions.
-local initialShellTop = root.AbsolutePosition.Y
-local initialLauncherY = initialShellTop - (LAUNCHER_HEIGHT / 2) - 10
-if initialLauncherY < LAUNCHER_HEIGHT / 2 + 8 then
-    initialLauncherY = LAUNCHER_HEIGHT / 2 + 8
-end
-launcher.Position = UDim2.fromOffset(gui.AbsoluteSize.X / 2, initialLauncherY)
 launcher.Size = UDim2.fromOffset(LAUNCHER_SIZE.X, LAUNCHER_SIZE.Y)
 launcher.BackgroundColor3 = CLOSED_SURFACE
 launcher.BorderSizePixel = 0
@@ -1916,6 +1868,28 @@ launcherResponsiveScale.Name = "ResponsiveLauncherScale"
 launcherResponsiveScale.Scale = 1
 launcherResponsiveScale.Parent = launcher
 
+local launcherPlacement = {}
+do
+    local defaults = { X = touchInputEnabled and 99 or 50, Y = touchInputEnabled and 90 or 0,
+        OffsetX = 0, OffsetY = touchInputEnabled and 15 or 14, Scale = 100 }
+    launcherPlacement.Defaults = defaults
+    for key, value in pairs(defaults) do launcherPlacement[key] = value end
+
+    function launcherPlacement.Apply()
+        local camera = Workspace.CurrentCamera
+        local viewport = camera and camera.ViewportSize or gui.AbsoluteSize
+        local topLeft, safeEnd = getWindowSafeBounds(viewport)
+        local padding = LAUNCHER_SIZE * (launcherResponsiveScale.Scale * 0.5) + Vector2.new(6, 6)
+        local middle = (topLeft + safeEnd) * 0.5
+        local minX, maxX = math.min(topLeft.X + padding.X, middle.X), math.max(safeEnd.X - padding.X, middle.X)
+        local minY, maxY = math.min(topLeft.Y + padding.Y, middle.Y), math.max(safeEnd.Y - padding.Y, middle.Y)
+        local x = minX + (maxX - minX) * launcherPlacement.X / 100 + launcherPlacement.OffsetX
+        local y = minY + (maxY - minY) * launcherPlacement.Y / 100 + launcherPlacement.OffsetY
+        local offset = Vector2.new(math.clamp(x, minX, maxX), math.clamp(y, minY, maxY)) - gui.AbsolutePosition
+        launcher.Position = UDim2.fromOffset(offset.X, offset.Y)
+    end
+end
+
 local function updateLauncherResponsiveScale()
     local camera = Workspace.CurrentCamera
     local viewport = camera and camera.ViewportSize or gui.AbsoluteSize
@@ -1925,7 +1899,8 @@ local function updateLauncherResponsiveScale()
         scale = math.clamp(math.min(viewport.X / 430, viewport.Y / 760, 1), 0.72, 1)
     end
 
-    launcherResponsiveScale.Scale = scale
+    launcherResponsiveScale.Scale = scale * launcherPlacement.Scale / 100
+    launcherPlacement.Apply()
 end
 
 local launcherViewportConnection
@@ -2004,10 +1979,6 @@ launcher:GetPropertyChangedSignal("AbsoluteSize"):Connect(syncLauncherGlow)
 task.defer(syncLauncherGlow)
 
 local windowIsOpen = false
-local windowTransitionId = 0
--- Keep transition handles and the resting position together to limit top-level locals.
--- The entire shell is summoned from / recalled into the launcher with no fade or outline flash.
-local windowTransitionTweens = { Scale = nil, Settle = nil, Position = nil, PositionSettle = nil, Rotation = nil }
 local setWindowOpen
 
 local function refreshLauncherVisibility()
@@ -2025,11 +1996,10 @@ local function refreshLauncherVisibility()
     end
 end
 
--- Always animate the Syllinse window around the viewport center. The floating launcher
--- is independently draggable; its position must never determine where the main UI opens.
+-- The shell opens at its own position, independently of the launcher.
 local function centeredWindowPosition()
     if touchInputEnabled then
-        return UDim2.new(0.5, 0, 0.5, mobileSafeOffsetY)
+        return UDim2.new(0.5, mobileSafeOffsetX, 0.5, mobileSafeOffsetY)
     end
     return UDim2.fromScale(0.5, 0.5)
 end
@@ -2038,82 +2008,21 @@ setWindowOpen = function(open)
     open = open == true
     if open == windowIsOpen then return end
 
-    -- Cancel any in-flight animation before reversing direction. The launcher is never
-    -- used as a travel destination: the shell opens and closes in place, and the launcher
-    -- stays anchored exactly where the user left it.
-    for _, activeTween in pairs({
-        windowTransitionTweens.Scale,
-        windowTransitionTweens.Settle,
-        windowTransitionTweens.Position,
-        windowTransitionTweens.PositionSettle,
-        windowTransitionTweens.Rotation,
-    }) do
-        if activeTween then
-            pcall(function() activeTween:Cancel() end)
-        end
-    end
-    windowTransitionTweens.Scale = nil
-    windowTransitionTweens.Settle = nil
-    windowTransitionTweens.Position = nil
-    windowTransitionTweens.PositionSettle = nil
-    windowTransitionTweens.Rotation = nil
-
+    local previousTween = windowScaleTween
+    windowScaleTween = nil
+    if previousTween then previousTween:Cancel() end
     windowIsOpen = open
-    windowTransitionId += 1
-    local thisTransition = windowTransitionId
 
-    local targetPosition
-    if windowHasCustomPosition then
-        targetPosition = root.Position
-    else
-        targetPosition = centeredWindowPosition()
-    end
-
-    -- Always keep the shell anchored at its final position. This intentionally removes
-    -- the launcher-to-window travel that made the UI shoot upward and appear to hide.
-    root.Position = targetPosition
+    if not windowHasCustomPosition then root.Position = centeredWindowPosition() end
     root.Rotation = 0
-
+    local transition = TweenService:Create(uiScale,
+        TweenInfo.new(open and 0.22 or 0.13, Enum.EasingStyle.Sine,
+            open and Enum.EasingDirection.Out or Enum.EasingDirection.In),
+        { Scale = responsiveScaleValue * (open and 1 or 0.88) })
+    windowScaleTween = transition
     if open then
-        local wasVisible = root.Visible
-        root.Size = baseWindowSize
-
-        if not wasVisible then
-            -- A compact, centered start gives a premium reveal without moving the window.
-            windowMotionFactor.Value = 0.88
-        end
-
-        root.BackgroundColor3 = Theme.Root
-        root.BackgroundTransparency = 0
-        root.ClipsDescendants = true
+        if not root.Visible then uiScale.Scale = responsiveScaleValue * 0.88 end
         root.Visible = true
-        motionBody.GroupTransparency = 0
-        motionBody.Position = UDim2.fromOffset(0, 0)
-        refreshLauncherVisibility()
-
-        -- One-piece reveal: the entire opaque shell expands, then gently settles.
-        local openInfo = TweenInfo.new(0.19, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
-        local settleInfo = TweenInfo.new(0.075, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
-        windowTransitionTweens.Scale = TweenService:Create(windowMotionFactor, openInfo, {
-            -- Settle at exactly 100% of the selected window size; no hidden 104% overshoot.
-            Value = 1,
-        })
-        windowTransitionTweens.Scale.Completed:Connect(function(playbackState)
-            if playbackState ~= Enum.PlaybackState.Completed then return end
-            if thisTransition ~= windowTransitionId or not windowIsOpen then return end
-
-            windowTransitionTweens.Settle = TweenService:Create(windowMotionFactor, settleInfo, {
-                Value = 1,
-            })
-            windowTransitionTweens.Settle.Completed:Connect(function(settleState)
-                if settleState ~= Enum.PlaybackState.Completed then return end
-                if thisTransition ~= windowTransitionId or not windowIsOpen then return end
-                windowTransitionTweens.Scale = nil
-                windowTransitionTweens.Settle = nil
-            end)
-            windowTransitionTweens.Settle:Play()
-        end)
-        windowTransitionTweens.Scale:Play()
     else
         -- Close Reptillian dropdowns with the shell so detached option popups never remain onscreen.
         if ReptillianLibrary and ReptillianLibrary.OpenFrames then
@@ -2132,33 +2041,17 @@ setWindowOpen = function(open)
         end
         if Lumen and Lumen._Instance then Lumen._Instance.Enabled = true end
         if Lumen and Lumen._Overlay then Lumen._Overlay.Enabled = true end
-
-        -- Fast, centered close. No translation, no partial-content fade, and no outline flash.
-        local closeInfo = TweenInfo.new(0.12, Enum.EasingStyle.Quint, Enum.EasingDirection.In)
-        windowTransitionTweens.Scale = TweenService:Create(windowMotionFactor, closeInfo, {
-            Value = 0.88,
-        })
-        windowTransitionTweens.Scale.Completed:Connect(function(playbackState)
-            if playbackState ~= Enum.PlaybackState.Completed then return end
-            if thisTransition ~= windowTransitionId or windowIsOpen then return end
-
-            root.Visible = false
-            root.BackgroundColor3 = Theme.Root
-            root.BackgroundTransparency = 0
-            root.Rotation = 0
-            motionBody.GroupTransparency = 0
-            motionBody.Position = UDim2.fromOffset(0, 0)
-            windowMotionFactor.Value = 1
-            uiScale.Scale = responsiveScaleValue * windowMotionFactor.Value
-            windowTransitionTweens.Scale = nil
-            windowTransitionTweens.Settle = nil
-            windowTransitionTweens.Position = nil
-            windowTransitionTweens.PositionSettle = nil
-            windowTransitionTweens.Rotation = nil
-            refreshLauncherVisibility()
-        end)
-        windowTransitionTweens.Scale:Play()
     end
+    refreshLauncherVisibility()
+    transition.Completed:Connect(function(playbackState)
+        if windowScaleTween ~= transition or playbackState ~= Enum.PlaybackState.Completed then return end
+        if not open then root.Visible = false end
+        uiScale.Scale = responsiveScaleValue
+        windowScaleTween = nil
+        local hosts = open and lumenHosts[activeName]
+        if hosts and hosts.RefreshScroll then task.defer(hosts.RefreshScroll) end
+    end)
+    transition:Play()
 end
 
 launcher.MouseEnter:Connect(function()
@@ -2194,52 +2087,8 @@ launcher.MouseLeave:Connect(function()
     tween(launcherGlowViolet, 0.22, { ImageTransparency = 1 - (0.07 * opacity), Size = UDim2.fromOffset(56, 56) })
 end)
 
--- The launcher is draggable like the reference pill; a tap toggles open/closed, while a drag only repositions it.
-local draggingLauncher = false
-local launcherMoved = false
-local launcherGrab = Vector2.zero
-local launcherDragStart = Vector2.zero
-launcher.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        -- InputObject.Position is a Vector3 in Roblox; convert screen X/Y to Vector2
-        -- before comparing it with GuiObject.AbsolutePosition (a Vector2).
-        local inputPosition = Vector2.new(input.Position.X, input.Position.Y)
-        draggingLauncher = true
-        launcherMoved = false
-        launcherGrab = inputPosition - launcher.AbsolutePosition
-        launcherDragStart = inputPosition
-    end
-end)
-UserInputService.InputChanged:Connect(function(input)
-    if not draggingLauncher then return end
-    if input.UserInputType ~= Enum.UserInputType.MouseMovement and input.UserInputType ~= Enum.UserInputType.Touch then
-        return
-    end
-
-    local inputPosition = Vector2.new(input.Position.X, input.Position.Y)
-    if (inputPosition - launcherDragStart).Magnitude > 3 then
-        launcherMoved = true
-    end
-    if not launcherMoved then return end
-
-    local point = inputPosition - launcherGrab - gui.AbsolutePosition
-    launcher.AnchorPoint = Vector2.new(0, 0)
-    launcher.Position = UDim2.fromOffset(
-        math.clamp(point.X, 0, math.max(gui.AbsoluteSize.X - launcher.AbsoluteSize.X, 0)),
-        math.clamp(point.Y, 0, math.max(gui.AbsoluteSize.Y - launcher.AbsoluteSize.Y, 0))
-    )
-    syncLauncherGlow()
-end)
-UserInputService.InputEnded:Connect(function(input)
-    if not draggingLauncher then return end
-    if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then
-        return
-    end
-
-    draggingLauncher = false
-    if not launcherMoved then
-        setWindowOpen(not windowIsOpen)
-    end
+launcher.Activated:Connect(function()
+    setWindowOpen(not windowIsOpen)
 end)
 
 -- Keep the enlarged 48x48 drag hit area fully invisible.
@@ -2313,7 +2162,8 @@ local dragStart
 local startPosition
 
 local function beginShellDrag(input)
-    if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then
+    if dragging or isPopupInteractionBlocked(dragButton)
+        or (input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch) then
         return
     end
     dragging = true
@@ -2322,8 +2172,10 @@ local function beginShellDrag(input)
     dragInput = input.UserInputType == Enum.UserInputType.Touch and input or Enum.UserInputType.MouseButton1
     dragStart = input.Position
     startPosition = root.Position
-    input.Changed:Connect(function()
-        if input.UserInputState == Enum.UserInputState.End then
+    local stateConnection
+    stateConnection = input:GetPropertyChangedSignal("UserInputState"):Connect(function()
+        if input.UserInputState == Enum.UserInputState.End or input.UserInputState == Enum.UserInputState.Cancel then
+            stateConnection:Disconnect()
             dragging = false
             dragInput = nil
         end
@@ -2346,17 +2198,20 @@ UserInputService.InputChanged:Connect(function(input)
 
         local camera = Workspace.CurrentCamera
         local viewport = camera and camera.ViewportSize or gui.AbsoluteSize
+        local safeStart, safeEnd = getWindowSafeBounds(viewport)
+        local guiOrigin, guiSize = gui.AbsolutePosition, gui.AbsoluteSize
         local shellSize = root.AbsoluteSize
         local dragSize = dragButton.AbsoluteSize
-        local centerX = viewport.X * startPosition.X.Scale + startPosition.X.Offset + pointerDelta.X
-        local centerY = viewport.Y * startPosition.Y.Scale + startPosition.Y.Offset + pointerDelta.Y
+        local centerX = guiOrigin.X + guiSize.X * startPosition.X.Scale + startPosition.X.Offset + pointerDelta.X
+        local centerY = guiOrigin.Y + guiSize.Y * startPosition.Y.Scale + startPosition.Y.Offset + pointerDelta.Y
 
         -- The left edge can leave the screen, but the drag icon itself must remain visible.
-        local minCenterX = 8 - shellSize.X / 2 + 6 + dragSize.X
+        local minCenterX = safeStart.X + (touchInputEnabled and (4 + shellSize.X / 2)
+            or (14 + dragSize.X - shellSize.X / 2))
         -- Keep the right edge of the shell on-screen so it cannot hide the drag icon.
-        local maxCenterX = viewport.X - shellSize.X / 2 - 8
+        local maxCenterX = safeEnd.X - shellSize.X / 2 - (touchInputEnabled and 4 or 8)
         if minCenterX > maxCenterX then
-            maxCenterX = viewport.X - shellSize.X / 2 + 2
+            maxCenterX = safeEnd.X - shellSize.X / 2 + 2
             minCenterX = math.min(minCenterX, maxCenterX)
         end
         centerX = math.clamp(centerX, minCenterX, maxCenterX)
@@ -2364,8 +2219,9 @@ UserInputService.InputChanged:Connect(function(input)
         -- Top matches the right side: keep the complete shell inside the top margin.
         -- Bottom remains flexible, but the top-right drag handle must stay reachable.
         local dragOffsetY = dragButton.AbsolutePosition.Y - root.AbsolutePosition.Y
-        local minCenterY = 8 + shellSize.Y / 2
-        local maxCenterY = viewport.Y - 8 - dragOffsetY - dragSize.Y + shellSize.Y / 2
+        local minCenterY = safeStart.Y + shellSize.Y / 2 + (touchInputEnabled and 4 or 8)
+        local maxCenterY = touchInputEnabled and (safeEnd.Y - shellSize.Y / 2 - 4)
+            or (safeEnd.Y - 8 - dragOffsetY - dragSize.Y + shellSize.Y / 2)
         if maxCenterY < minCenterY then
             centerY = minCenterY
         else
@@ -2374,9 +2230,9 @@ UserInputService.InputChanged:Connect(function(input)
 
         root.Position = UDim2.new(
             startPosition.X.Scale,
-            centerX - viewport.X * startPosition.X.Scale,
+            centerX - guiOrigin.X - guiSize.X * startPosition.X.Scale,
             startPosition.Y.Scale,
-            centerY - viewport.Y * startPosition.Y.Scale
+            centerY - guiOrigin.Y - guiSize.Y * startPosition.Y.Scale
         )
 
         -- Rebase after each update. This prevents edge-clamping from feeling sticky:
@@ -2647,16 +2503,23 @@ local loadOk, LumenOrError = pcall(function()
     librarySource = string.gsub(librarySource,
         'Name = "Circle"; AnchorPoint = V2%(1, 0%.5%); BackgroundColor3 = RGB%(0, 0, 0%);',
         'Name = "Circle"; AnchorPoint = V2(1, 0.5); BackgroundColor3 = RGB(112, 110, 110);')
+    -- Separate the visible rail from the drag target so touch sizing can vary independently.
+    librarySource, didPatch = replaceLibraryText(
+        librarySource,
+        'local Overlay = Add("Frame", { Parent = Button; Name = "Overlay"; BackgroundColor3 = RGB(255, 255, 255); BorderColor3 = RGB(0, 0, 0); BorderSizePixel = 0; Size = UD2(0, 0, 1, 0); }) :: Frame',
+        'local Rail = Add("Frame", { Parent = Button; Name = "SyllinseSliderRail"; AnchorPoint = V2(0, 0.5); Position = UFS(0, 0.5); Size = UD2(1, 0, 0, 5); BackgroundColor3 = RGB(64, 62, 62); BorderSizePixel = 0; }) :: Frame\n\tAdd("UICorner", { Parent = Rail; CornerRadius = UD(1, 0); })\n\tButton.BackgroundTransparency = 1\n\tlocal Overlay = Add("Frame", { Parent = Rail; Name = "Overlay"; Size = UD2(0, 0, 1, 0); BackgroundColor3 = RGB(255, 255, 255); BorderSizePixel = 0; ZIndex = 2; }) :: Frame'
+    )
+    if not didPatch then warn("[Syllinse] Could not add the thinner slider rail") end
     librarySource, didPatch = replaceLibraryText(
         librarySource,
         'local Circle = Add("Frame", { Parent = Button; Name = "Circle"; AnchorPoint = V2(1, 0.5); BackgroundColor3 = RGB(112, 110, 110); BorderColor3 = RGB(0, 0, 0); BorderSizePixel = 0; Position = UD2(1, -3, 0.5, 0); Size = UFO(8, 8); }) :: Frame',
-        'local Circle = Add("Frame", { Parent = Button; Name = "Circle"; AnchorPoint = V2(0.5, 0.5); BackgroundColor3 = RGB(220, 218, 218); BorderColor3 = RGB(0, 0, 0); BorderSizePixel = 0; Position = UD2(0, 8, 0.5, 0); Size = UFO(16, 16); }) :: Frame'
+        'local Circle = Add("Frame", { Parent = Button; Name = "Circle"; AnchorPoint = V2(0.5, 0.5); BackgroundColor3 = RGB(220, 218, 218); BorderColor3 = RGB(0, 0, 0); BorderSizePixel = 0; Position = UD2(0, 8, 0.5, 0); Size = UFO(16, 16); ZIndex = 3; }) :: Frame'
     )
     if not didPatch then warn("[Syllinse] Could not enlarge and center Lumen slider handles") end
     librarySource, didPatch = replaceLibraryText(
         librarySource,
         'Tween(Circle, { Position = UD2(Alpha, -3, 0.5, 0); BackgroundTransparency = Fade }, 0.08)',
-        'Tween(Circle, { Position = UD2(Alpha, 8 - 16 * Alpha, 0.5, 0); BackgroundTransparency = 0 }, 0.08)'
+        'Tween(Circle, { Position = UD2(Alpha, Circle.Size.X.Offset * (0.5 - Alpha), 0.5, 0) }, 0.08)'
     )
     if not didPatch then warn("[Syllinse] Could not align Lumen slider handles with the active fill") end
 
@@ -2666,7 +2529,7 @@ local loadOk, LumenOrError = pcall(function()
     librarySource, didPatch = replaceLibraryText(
         librarySource,
         'Tween(Overlay, { Size = UD2(Alpha, 0, 1, 0); BackgroundTransparency = Fade }, 0.08)',
-        'Tween(Overlay, { Size = UD2(Alpha, 8 - 16 * Alpha, 1, 0); BackgroundTransparency = Fade }, 0.08)'
+        'Tween(Overlay, { Size = UD2(Alpha, Circle.Size.X.Offset * (0.5 - Alpha), 1, 0); BackgroundTransparency = Fade }, 0.08)'
     )
     if not didPatch then warn("[Syllinse] Could not align the slider fill endpoint under its thumb") end
 
@@ -2675,7 +2538,7 @@ local loadOk, LumenOrError = pcall(function()
     librarySource, didPatch = replaceLibraryText(
         librarySource,
         'BindSlider(Button, function(Alpha)\n\t\tSlider.Set(Slider.Min + (Slider.Max - Slider.Min) * Alpha.X)\n\tend)',
-        'BindSlider(Button, function(Alpha)\n\t\tlocal Width = Button.AbsoluteSize.X\n\t\tlocal Inset = math.min(8, Width * 0.5)\n\t\tlocal UsableWidth = math.max(Width - Inset * 2, 1)\n\t\tlocal AdjustedAlpha = MC((Alpha.X * Width - Inset) / UsableWidth, 0, 1)\n\t\tSlider.Set(Slider.Min + (Slider.Max - Slider.Min) * AdjustedAlpha)\n\tend)'
+        'BindSlider(Button, function(Alpha)\n\t\tlocal Width = Button.AbsoluteSize.X\n\t\tlocal Inset = math.min(Circle.AbsoluteSize.X * 0.5, Width * 0.5)\n\t\tlocal UsableWidth = math.max(Width - Inset * 2, 1)\n\t\tlocal AdjustedAlpha = MC((Alpha.X * Width - Inset) / UsableWidth, 0, 1)\n\t\tlocal Value = Slider.Min + (Slider.Max - Slider.Min) * AdjustedAlpha\n\t\tif MC(MR(Value / Slider.Increment) * Slider.Increment, Slider.Min, Slider.Max) ~= Slider.Value then Slider.Set(Value) end\n\tend)'
     )
     if not didPatch then warn("[Syllinse] Could not apply Lumen slider endpoint hitbox fix") end
 
@@ -2683,7 +2546,7 @@ local loadOk, LumenOrError = pcall(function()
     librarySource, didPatch = replaceLibraryText(
         librarySource,
         'local SliderGrad = Add("UIGradient", { Parent = Overlay; Color = CS{ CSK(0, Library.Theme.AccentDark), CSK(1, Library.Theme.Accent) }; Rotation = -90; })\n\tLibrary.ThemeLink(SliderGrad, "Gradient", "AccentDark", "Accent")',
-        'local SliderGrad = Add("UIGradient", { Parent = Overlay; Color = CS{ CSK(0, Library.Theme.SliderFillBottom), CSK(1, Library.Theme.SliderFillTop) }; Rotation = -90; })\n\tLibrary.ThemeLink(SliderGrad, "Gradient", "SliderFillBottom", "SliderFillTop")'
+        'local SliderGrad = Add("UIGradient", { Parent = Overlay; Color = CS{ CSK(0, Library.Theme.SliderFillBottom), CSK(1, Library.Theme.SliderFillTop) }; Rotation = 0; })\n\tLibrary.ThemeLink(SliderGrad, "Gradient", "SliderFillBottom", "SliderFillTop")'
     )
     if not didPatch then warn("[Syllinse] Could not recolor Lumen slider fill; the upstream source may have changed") end
 
@@ -2817,14 +2680,77 @@ local loadOk, LumenOrError = pcall(function()
         'Handle.InputBegan:Connect(function(Input)\n\t\tif Input.UserInputType',
         'Handle.InputBegan:Connect(function(Input)\n\t\tif Object:GetAttribute("SyllinseManagedPopupDrag") then return end\n\t\tif Input.UserInputType')
     if not didPatch then warn("[Syllinse] Could not route native popup dragging") end
-    librarySource, didPatch = replaceLibraryText(librarySource,
-        'Object.InputBegan:Connect(function(Input)',
-        'Object.InputBegan:Connect(function(Input)\n\t\tif Library._SyllinsePopupBlocksInteraction and Library._SyllinsePopupBlocksInteraction(Object) then return end')
-    if not didPatch then warn("[Syllinse] Could not protect covered sliders from popup input") end
-    librarySource, didPatch = replaceLibraryText(librarySource,
-        'local function Update(Input: InputObject)\n\t\tlocal Origin = Object.AbsolutePosition',
-        'local function Update(Input: InputObject)\n\t\tif Library._SyllinsePopupBlocksInteraction and Library._SyllinsePopupBlocksInteraction(Object) then return end\n\t\tlocal Origin = Object.AbsolutePosition')
-    if not didPatch then warn("[Syllinse] Could not protect covered slider drags") end
+    librarySource, didPatch = replaceLibrarySpan(librarySource, "local function BindSlider(", "local function Tween(", [[
+local function BindSlider(Object: GuiObject, Callback: (Alpha: Vector2) -> ())
+    local finish
+    local function blocked()
+        return Library._SyllinsePopupBlocksInteraction and Library._SyllinsePopupBlocksInteraction(Object)
+    end
+    local function update(point)
+        if blocked() then return end
+        local origin, size = Object.AbsolutePosition, Object.AbsoluteSize
+        Callback(V2(
+            size.X > 0 and MC((point.X - origin.X) / size.X, 0, 1) or 0,
+            size.Y > 0 and MC((point.Y - origin.Y) / size.Y, 0, 1) or 0))
+    end
+    Object.InputBegan:Connect(function(input)
+        local touch = input.UserInputType == UIT.Touch
+        if finish or blocked() or (not touch and input.UserInputType ~= UIT.MouseButton1) then return end
+        local scroller
+        if touch and Object.Parent and Object.Parent.Name == "SliderFrame" then
+            local parent = Object.Parent
+            while parent do
+                if parent:IsA("ScrollingFrame") and parent:GetAttribute("_syllinseTouchGuardBound") then
+                    if not parent.ScrollingEnabled then return end
+                    scroller = parent
+                    break
+                end
+                parent = parent.Parent
+            end
+        end
+        local start = input.Position
+        local adjusting = scroller == nil
+        local move, state, focus
+        local function stop(cancelled)
+            if finish ~= stop then return end
+            finish = nil
+            move:Disconnect()
+            state:Disconnect()
+            focus:Disconnect()
+            if scroller and adjusting and scroller.Parent then
+                scroller:SetAttribute("_syllinseSliderDrag", nil)
+                scroller.ScrollingEnabled = true
+            end
+            if not cancelled and not adjusting then update(start) end
+        end
+        finish = stop
+        move = UserInputService.InputChanged:Connect(function(changed)
+            if finish ~= stop then return end
+            if touch and changed ~= input or not touch and changed.UserInputType ~= UIT.MouseMovement then return end
+            local point = changed.Position
+            if not adjusting then
+                local dx, dy = math.abs(point.X - start.X), math.abs(point.Y - start.Y)
+                if math.max(dx, dy) < 8 then return end
+                if dy >= dx or blocked() or not scroller.ScrollingEnabled then stop(true); return end
+                adjusting = true
+                scroller:SetAttribute("_syllinseSliderDrag", true)
+                scroller.ScrollingEnabled = false
+                scroller:ResetScrollVelocity()
+            end
+            update(point)
+        end)
+        state = input:GetPropertyChangedSignal("UserInputState"):Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then stop(false)
+            elseif input.UserInputState == Enum.UserInputState.Cancel then stop(true) end
+        end)
+        focus = UserInputService.WindowFocusReleased:Connect(function() stop(true) end)
+        if adjusting then update(start) end
+    end)
+    Object.Destroying:Connect(function() if finish then finish(true) end end)
+end
+
+]])
+    if not didPatch then warn("[Syllinse] Could not update slider touch handling") end
 
     local compileLibrary = loadstring(librarySource)
     assert(type(compileLibrary) == "function", "Lumen source could not be compiled after compatibility patches")
@@ -2833,6 +2759,54 @@ end)
 assert(loadOk and type(LumenOrError) == "table" and type(LumenOrError.Window) == "function",
     "Could not load Lumen UI library: " .. tostring(LumenOrError))
 Lumen = LumenOrError
+do
+    local controls = setmetatable({}, { __mode = "k" })
+    Lumen._SyllinseResponsiveSizing = function(object, resize)
+        controls[object] = resize
+        resize(math.max(responsiveScaleValue, 0.25), object)
+    end
+    resizeResponsiveControls = function()
+        local scale = math.max(responsiveScaleValue, 0.25)
+        for object, resize in pairs(controls) do
+            if object.Parent then resize(scale, object) end
+        end
+    end
+end
+Lumen._SyllinseInlineRow = function(control)
+    local parent = control.Parent
+    if parent and parent.Name == "SyllinseInlineSlot" then parent = parent.Parent end
+    return parent and parent.Name == "RightContent" and parent or nil
+end
+
+Lumen._SyllinseLayoutInlineControl = function(control, config, row)
+    local slot = control.Parent
+    if slot == row then
+        slot = Instance.new("Frame")
+        slot.Name = "SyllinseInlineSlot"
+        slot.BackgroundTransparency = 1
+        slot.BorderSizePixel = 0
+        slot.Active = false
+        slot.LayoutOrder = config.RowOrder
+        slot.Parent = row
+        control.Parent = slot
+    end
+    control.AnchorPoint = Vector2.new(0.5, 0.5)
+    control.Position = UDim2.fromScale(0.5, 0.5)
+    local layout = row:FindFirstChildOfClass("UIListLayout")
+    if layout then
+        layout.VerticalAlignment = Enum.VerticalAlignment.Center
+        layout.Padding = UDim.new(0, 4)
+    end
+    Lumen._SyllinseResponsiveSizing(control, function(scale, object)
+        local fitted = math.max(24, math.ceil(20 / scale))
+        local artwork = math.round(fitted * config.ArtworkScale)
+        slot.Size = UDim2.fromOffset(fitted, fitted)
+        object.Size = UDim2.fromOffset(artwork, artwork)
+    end)
+    if control:IsA("ImageLabel") or control:IsA("ImageButton") then
+        control.ResampleMode = Enum.ResamplerMode.Default
+    end
+end
 if Lumen._Instance then
     Lumen._Instance:SetAttribute("SyllinseLumenBackend", true)
     Lumen._Instance.IgnoreGuiInset = true
@@ -3030,6 +3004,8 @@ end]], "" },
         { 'if not isfile(Library.Directory .. "/autoload.json") then', 'if type(isfile) ~= "function" or not isfile(Library.Directory .. "/autoload.json") then' },
         { 'local OptionHeight = 18', 'local OptionHeight = ' .. tostring(SYLLINSE_REPTILLIAN_DROPDOWN_STYLE.OptionHeight) },
         { 'local OptionGap = 6', 'local OptionGap = ' .. tostring(SYLLINSE_REPTILLIAN_DROPDOWN_STYLE.OptionGap) },
+        { 'function OptionData:Set()\n                    if not Dropdown.IsOpen then return end',
+            'function OptionData:Set()\n                    if not Dropdown.IsOpen or (Dropdown.KeepSelection and OptionData.IsSelected) then return end' },
         -- Keep each clickable option row exactly OptionHeight tall; OptionGap belongs
         -- between rows in the layout, not inside each button as trailing blank space.
         { 'local SetOptionSearchVisible = function(OptionData, OptionItems, Visible) -- sorry i have to do this brto ', 'local SetOptionSearchVisible = function(OptionData, OptionItems, Visible, RowHeight) -- sorry i have to do this brto ' },
@@ -3473,6 +3449,13 @@ end
 
 -- Shared field geometry: dropdowns and textboxes use the same closed-field settings.
 SyllinseRuntime.textboxRows = {}
+SyllinseRuntime.fitTouchField = function(row, field)
+    if not touchInputEnabled or not row or not field then return end
+    local fieldHeight = math.max(SYLLINSE_REPTILLIAN_CLOSED_FIELD_HEIGHT, 40)
+    local labelHeight = SYLLINSE_REPTILLIAN_DROPDOWN_ROW_HEIGHT - SYLLINSE_REPTILLIAN_CLOSED_FIELD_HEIGHT + 3
+    field.Size = UDim2.new(1, 0, 0, fieldHeight)
+    row.Size = UDim2.new(1, 0, 0, fieldHeight + labelHeight)
+end
 SyllinseRuntime.styleFieldBorder = function(field)
     local stroke = field:FindFirstChild("SyllinseFieldOutline")
     if not stroke then
@@ -3491,6 +3474,7 @@ SyllinseRuntime.styleDropdownField = function(dropdown)
     local row = items.Dropdown and items.Dropdown.Instance or (outline and outline.Parent)
     if row then row:SetAttribute("SyllinseManagedDropdown", true) end
     if outline and outline.Parent then
+        if touchInputEnabled then SyllinseRuntime.fitTouchField(row, outline) end
         -- The outline is separate from the control's opaque fill.
         outline.BackgroundTransparency = 1
         outline.BorderSizePixel = 0
@@ -3538,6 +3522,7 @@ SyllinseRuntime.styleTextboxRow = function(row)
     field.AnchorPoint = Vector2.new(0, 1)
     field.Position = UDim2.new(0, 0, 1, 0)
     field.Size = UDim2.new(1, 0, 0, SYLLINSE_REPTILLIAN_CLOSED_FIELD_HEIGHT)
+    if touchInputEnabled then SyllinseRuntime.fitTouchField(row, field) end
     field.AutomaticSize = Enum.AutomaticSize.None
     field.ClipsDescendants = true
     field.BorderSizePixel = 0
@@ -3592,7 +3577,7 @@ SyllinseRuntime.styleTextboxRow = function(row)
     nativeTextBaseSizes[box] = SYLLINSE_REPTILLIAN_CLOSED_TEXT_SIZE
     local title = row:FindFirstChild("Title")
     if title then
-        title.FontFace, title.TextSize = FONT_MEDIUM, 14
+        title.FontFace, title.TextSize = FONT_MEDIUM, touchInputEnabled and 16 or 14
         title.TextColor3 = Theme.PanelText
         title:SetAttribute("SyllinseFieldText", true)
         nativeTextBaseSizes[title] = 14
@@ -3856,6 +3841,7 @@ SyllinseRuntime.addReptillianDropdown = function(section, options)
         Multi = multi, Flag = flag, MaxSize = SYLLINSE_REPTILLIAN_DROPDOWN_STYLE.MaxPopupHeight,
         Parent = { Instance = section.Content }, Callback = callback,
     })
+    dropdown.KeepSelection = not multi and options.KeepSelection == true
     local items = dropdown.Items
     local row = items.Dropdown.Instance
     row.Name = "ReptillianDropdownFrame"
@@ -3864,7 +3850,7 @@ SyllinseRuntime.addReptillianDropdown = function(section, options)
         {"OptionHolder", "ReptillianDropdownPopup"}, {"Search", "Search"}, {"Holder", "Holder"} }) do
         if items[pair[1]] and items[pair[1]].Instance then items[pair[1]].Instance.Name = pair[2] end
     end
-    items.Text.Instance.FontFace, items.Text.Instance.TextSize = FONT_MEDIUM, 14
+    items.Text.Instance.FontFace, items.Text.Instance.TextSize = FONT_MEDIUM, touchInputEnabled and 16 or 14
     items.Text.Instance.TextColor3 = Theme.PanelText
     items.Value.Instance.FontFace, items.Value.Instance.TextSize = FONT_MEDIUM, SYLLINSE_REPTILLIAN_CLOSED_TEXT_SIZE
     items.Value.Instance.TextColor3 = Theme.PanelValue
@@ -4529,6 +4515,8 @@ Lumen._SyllinseExpandMobileControlRow = function(control, targetHeight)
             if rightContent then
                 rightContent.AnchorPoint = Vector2.new(1, 0.5)
                 rightContent.Position = UDim2.new(1, 0, 0.5, 0)
+                local layout = rightContent:FindFirstChildOfClass("UIListLayout")
+                if layout then layout.VerticalAlignment = Enum.VerticalAlignment.Center end
             end
             return ancestor
         end
@@ -4543,14 +4531,14 @@ SyllinseRuntime.attachFeatureNotificationBell = function(label, toggleControl, f
 
     -- The bell belongs only beside a real keybind/settings gear. Some toggles do not
     -- have a keybind control, and must not get an orphan notification icon.
-    local settingsIcon = rightContent:FindFirstChild("Settings")
+    local settingsIcon = rightContent:FindFirstChild("Settings", true)
     if not settingsIcon or not settingsIcon:IsA("GuiObject") then return end
     if (touchInputEnabled and not UserInputService.KeyboardEnabled) then
         -- Keep a generous touch row for the native Lumen keybind/settings icon.
         Lumen._SyllinseExpandMobileControlRow(settingsIcon, 40)
     end
 
-    local existingBell = rightContent:FindFirstChild("FeatureNotificationBell_" .. featureFlag)
+    local existingBell = rightContent:FindFirstChild("FeatureNotificationBell_" .. featureFlag, true)
     if existingBell then
         if (touchInputEnabled and not UserInputService.KeyboardEnabled) then
             Lumen._SyllinseExpandMobileControlRow(existingBell, 40)
@@ -4565,12 +4553,6 @@ SyllinseRuntime.attachFeatureNotificationBell = function(label, toggleControl, f
 
     local bell = Instance.new("ImageButton")
     bell.Name = "FeatureNotificationBell_" .. featureFlag
-    -- Use the original notification artwork, enlarged directly with the ImageButton.
-    -- The responsive styling pass sets the final desktop/mobile dimensions.
-    local bellTouchFirst = touchInputEnabled and not UserInputService.KeyboardEnabled
-    local bellSize = bellTouchFirst and SYLLINSE_MANUAL_ICONS.NotificationBell.TouchSize
-        or SYLLINSE_MANUAL_ICONS.NotificationBell.DesktopSize
-    bell.Size = UDim2.fromOffset(bellSize, bellSize)
     bell.BackgroundTransparency = 1
     bell.BackgroundColor3 = Theme.SurfaceHover
     bell.BorderSizePixel = 0
@@ -4579,23 +4561,10 @@ SyllinseRuntime.attachFeatureNotificationBell = function(label, toggleControl, f
     bell.Image = SYLLINSE_MANUAL_ICONS.NotificationBell.Image
     bell.ImageColor3 = SyllinseRuntime.featureNotificationSettings[featureFlag] and Theme.Text or Theme.Muted
     bell.ScaleType = Enum.ScaleType.Fit
-    bell.LayoutOrder = 1
     bell.ZIndex = 8
     bell.Parent = rightContent
+    Lumen._SyllinseLayoutInlineControl(bell, SYLLINSE_MANUAL_ICONS.NotificationBell, rightContent)
     Lumen._SyllinseExpandMobileControlRow(bell, 40)
-
-    -- Keep the bell immediately LEFT of the keybind/settings gear. Other inline
-    -- controls (such as a color picker) stay after the bell/gear pair.
-    for _, sibling in ipairs(rightContent:GetChildren()) do
-        if sibling:IsA("GuiObject") and sibling ~= bell then
-            if sibling == settingsIcon then
-                sibling.LayoutOrder = 2
-            else
-                sibling.LayoutOrder = 3 + math.max(0, tonumber(sibling.LayoutOrder) or 0)
-            end
-        end
-    end
-    bell.LayoutOrder = 1
 
     bell:SetAttribute("FeatureFlag", featureFlag)
     bell:SetAttribute("Tooltip", "Toggle notifications for " .. tostring(label.Text or featureFlag))
@@ -4678,8 +4647,8 @@ SyllinseRuntime.setGuardedButtonInteractable = function(state, button, desiredSt
 end
 
 SyllinseRuntime.setMobileScrollState = function(state, scrolling)
-    if not state or state.Destroyed then return end
-    state.Scrolling = scrolling == true
+    if not state or state.Destroyed or state.Scrolling == scrolling then return end
+    state.Scrolling = scrolling
     pcall(function()
         state.Frame:SetAttribute("_mobileScrolling", state.Scrolling) -- MacLib-compatible marker
         state.Frame:SetAttribute("_syllinseMobileScrolling", state.Scrolling)
@@ -4720,17 +4689,11 @@ SyllinseRuntime.bindMobileScrollGuard = function(scrollFrame)
 
     scrollFrame.InputBegan:Connect(function(input)
         if input.UserInputType ~= Enum.UserInputType.Touch then return end
+        if state.ActiveInput and state.ActiveInput.UserInputState ~= Enum.UserInputState.End
+            and state.ActiveInput.UserInputState ~= Enum.UserInputState.Cancel then return end
         state.ActiveInput = input
         state.StartPosition = Vector2.new(input.Position.X, input.Position.Y)
         if state.Scrolling then SyllinseRuntime.setMobileScrollState(state, false) end
-    end)
-    scrollFrame.InputChanged:Connect(function(input)
-        if input.UserInputType ~= Enum.UserInputType.Touch or not state.ActiveInput then return end
-        local point = Vector2.new(input.Position.X, input.Position.Y)
-        local delta = point - (state.StartPosition or point)
-        if math.abs(delta.Y) > 8 and math.abs(delta.Y) > math.abs(delta.X) then
-            SyllinseRuntime.setMobileScrollState(state, true)
-        end
     end)
     scrollFrame.DescendantAdded:Connect(function(descendant)
         if state.Scrolling and descendant:IsA("GuiButton") then
@@ -4761,7 +4724,8 @@ SyllinseRuntime.bindMobileScrollGuard = function(scrollFrame)
             if input.UserInputType ~= Enum.UserInputType.Touch then return end
             local point = Vector2.new(input.Position.X, input.Position.Y)
             for _, activeState in ipairs(SyllinseRuntime.mobileScrollGuards) do
-                if not activeState.Destroyed and activeState.ActiveInput == input then
+                if not activeState.Destroyed and activeState.ActiveInput == input
+                    and not activeState.Frame:GetAttribute("_syllinseSliderDrag") then
                     local delta = point - (activeState.StartPosition or point)
                     if math.abs(delta.Y) > 8 and math.abs(delta.Y) > math.abs(delta.X) then
                         SyllinseRuntime.setMobileScrollState(activeState, true)
@@ -4992,18 +4956,17 @@ SyllinseRuntime.addToggle = function(label, options)
         if track.Parent and track.Parent:IsA("GuiObject") then
             track.Parent.ClipsDescendants = false
         end
-        track:SetAttribute("SyllinseBaseSwitchWidth", baseSwitchWidth)
-        track:SetAttribute("SyllinseBaseSwitchHeight", baseSwitchHeight)
         track.Size = UDim2.fromOffset(baseSwitchWidth, baseSwitchHeight)
 
         -- Lumen's LabelFrame uses a horizontal UIListLayout with a 10px default gap.
         -- Reduce that gap so the feature text sits naturally beside the compact switch.
         local leftContent = track.Parent
+        local labelGap = math.max(0, tonumber(SYLLINSE_MANUAL_STYLE.Switch.LabelGap) or 5)
         if leftContent and leftContent:IsA("GuiObject") then
             leftContent.AutomaticSize = Enum.AutomaticSize.XY
             local contentLayout = leftContent:FindFirstChildOfClass("UIListLayout")
             if contentLayout then
-                contentLayout.Padding = UDim.new(0, math.max(0, tonumber(SYLLINSE_MANUAL_STYLE.Switch.LabelGap) or 5))
+                contentLayout.Padding = UDim.new(0, labelGap)
                 contentLayout.VerticalAlignment = Enum.VerticalAlignment.Center
             end
         end
@@ -5011,17 +4974,43 @@ SyllinseRuntime.addToggle = function(label, options)
         if toggleRow and toggleRow.Name == "LabelFrame" then
             leftContent.AnchorPoint = Vector2.new(0, 0.5)
             leftContent.Position = UDim2.new(0, 0, 0.5, 0)
+            local size = toggleRow.Size
+            local rowHeight = math.max(SYLLINSE_MANUAL_STYLE.Switch.RowMinHeight,
+                baseSwitchHeight + SYLLINSE_MANUAL_STYLE.Switch.RowPadding)
+            if size.Y.Scale == 0 and size.Y.Offset < rowHeight then
+                toggleRow.Size = UDim2.new(size.X.Scale, size.X.Offset, 0, rowHeight)
+            end
+            toggleRow.ClipsDescendants = false
             local rightContent = toggleRow:FindFirstChild("RightContent")
             if rightContent and rightContent:IsA("GuiObject") then
                 rightContent.AnchorPoint = Vector2.new(1, 0.5)
                 rightContent.Position = UDim2.new(1, 0, 0.5, 0)
+                if touchInputEnabled and toggleCaption then
+                    local function fitCaption()
+                        local width = math.ceil(rightContent.AbsoluteSize.X / math.max(uiScale.Scale, 0.001))
+                        leftContent.Size = UDim2.new(1, width > 0 and -width - 8 or 0, 1, 0)
+                    end
+                    if not toggleRow:GetAttribute("SyllinseMobileCaptionBound") then
+                        toggleRow:SetAttribute("SyllinseMobileCaptionBound", true)
+                        rightContent:GetPropertyChangedSignal("AbsoluteSize"):Connect(fitCaption)
+                    end
+                    leftContent.AutomaticSize = Enum.AutomaticSize.None
+                    toggleCaption.AutomaticSize = Enum.AutomaticSize.None
+                    toggleCaption.Size = UDim2.new(1, -baseSwitchWidth - labelGap, 1, 0)
+                    toggleCaption.TextXAlignment = Enum.TextXAlignment.Left
+                    toggleCaption.TextWrapped = true
+                    fitCaption()
+                    if toggleRow.Size.Y.Scale == 0 and toggleRow.Size.Y.Offset < 40 then
+                        toggleRow.Size = UDim2.new(size.X.Scale, size.X.Offset, 0, 40)
+                    end
+                end
             end
         end
 
         -- Keep feature captions optically smaller than section headings.
         -- Apply this to the actual text objects beside the Toggle, not the whole row.
         local labelTextSize = math.max(10, tonumber(SYLLINSE_MANUAL_STYLE.Switch.LabelTextSize)
-            or (baseSwitchHeight - 2))
+            or (baseSwitchHeight - 2)) + (touchInputEnabled and 1 or 0)
         local labelTextColor = SYLLINSE_MANUAL_STYLE.Switch.LabelTextColor
             or Color3.fromRGB(190, 188, 188)
         local activeLabelTextColor = Theme.Text
@@ -5048,35 +5037,6 @@ SyllinseRuntime.addToggle = function(label, options)
                     textObject.AutoLocalize = false
                 end
             end
-        end
-
-        local switchScale = track:FindFirstChild("SyllinseSwitchScaleCompensation")
-        if not switchScale then
-            switchScale = Instance.new("UIScale")
-            switchScale.Name = "SyllinseSwitchScaleCompensation"
-            switchScale.Parent = track
-        end
-        switchScale.Scale = 1 / math.max(responsiveScaleValue, 0.25)
-
-        -- Reserve a compact row for the visible switch. Touch devices receive a larger
-        -- transparent interaction area through the mobile row-expansion helper.
-        local switchRow = track.Parent
-        while switchRow and switchRow ~= root do
-            if switchRow.Name == "LabelFrame" then
-                if switchRow:GetAttribute("SyllinseToggleBaseRowHeight") == nil then
-                    switchRow:SetAttribute("SyllinseToggleBaseRowHeight", switchRow.Size.Y.Offset)
-                end
-                local baseHeight = switchRow:GetAttribute("SyllinseToggleBaseRowHeight") or switchRow.Size.Y.Offset
-                local minimumPhysicalHeight = math.max(SYLLINSE_MANUAL_STYLE.Switch.RowMinHeight, SYLLINSE_MANUAL_STYLE.Switch.Height + SYLLINSE_MANUAL_STYLE.Switch.RowPadding)
-                local targetHeight = math.max(
-                    baseHeight, minimumPhysicalHeight / math.max(responsiveScaleValue, 0.25))
-                if switchRow.Size.Y.Scale == 0 then
-                    switchRow.Size = UDim2.new(switchRow.Size.X.Scale, switchRow.Size.X.Offset, 0, math.ceil(targetHeight))
-                    switchRow.ClipsDescendants = false
-                end
-                break
-            end
-            switchRow = switchRow.Parent
         end
 
         local onTrackColor = Theme.ThemedControls and Theme.Surface:Lerp(Theme.Accent, 0.56)
@@ -5480,7 +5440,7 @@ navContainer.ScrollingEnabled = true
 
 SyllinseRuntime.stylePageScrollbar = function(scroll)
     local lock = SyllinseRuntime.dropdownScrollLocks and SyllinseRuntime.dropdownScrollLocks[scroll]
-    scroll.ScrollingEnabled = not (lock and lock.Count > 0)
+    scroll.ScrollingEnabled = not (lock and lock.Count > 0) and not scroll:GetAttribute("_syllinseSliderDrag")
     scroll.ClipsDescendants = true
     scroll.ScrollBarThickness = 0
     scroll.ScrollBarImageTransparency = 1
@@ -5574,14 +5534,22 @@ SyllinseRuntime.makePage = function(name, icon)
     end
     scroll:GetPropertyChangedSignal("CanvasPosition"):Connect(syncScrollOffset)
     local function refreshScroll()
-        if not scroll.Parent then return end
+        if not scroll.Parent or windowScaleTween then return end
         local scale = math.max(uiScale.Scale, 0.001)
         local leftHeight = columnHeight(leftColumn, scale)
         local rightHeight = columnHeight(rightColumn, scale)
-        local height = math.max(PANEL_HEIGHT, leftHeight, rightHeight)
+        local height = math.max(PANEL_HEIGHT, compactTouchLayout
+            and (leftHeight + rightHeight) or math.max(leftHeight, rightHeight))
         pageFrame.Size = UDim2.new(1, 0, 0, height)
-        leftColumn.Size = UDim2.new(0.5, columnWidthOffset, 0, height)
-        rightColumn.Size = UDim2.new(0.5, columnWidthOffset, 0, height)
+        if compactTouchLayout then
+            leftColumn.Size = UDim2.new(1, -leftInset - 12, 0, leftHeight)
+            rightColumn.Size = UDim2.new(1, -leftInset - 12, 0, rightHeight)
+            rightColumn.Position = UDim2.fromOffset(leftInset, leftHeight)
+        else
+            leftColumn.Size = UDim2.new(0.5, columnWidthOffset, 0, height)
+            rightColumn.Size = UDim2.new(0.5, columnWidthOffset, 0, height)
+            rightColumn.Position = UDim2.new(0.5, rightInset, 0, 0)
+        end
         local canvasHeight = PANEL_HEIGHT + math.max(0, height - PANEL_HEIGHT) / scrollFactor
         scroll.CanvasSize = UDim2.new(0, 0, 0, canvasHeight)
         local maxY = math.max(0, (canvasHeight - PANEL_HEIGHT) * scale)
@@ -5590,7 +5558,7 @@ SyllinseRuntime.makePage = function(name, icon)
     end
     local queued = false
     local function scheduleRefresh()
-        if queued then return end
+        if queued or windowScaleTween or not scroll.Visible then return end
         queued = true
         task.defer(function()
             queued = false
@@ -5603,7 +5571,6 @@ SyllinseRuntime.makePage = function(name, icon)
         column.ChildAdded:Connect(scheduleRefresh)
         column.ChildRemoved:Connect(scheduleRefresh)
     end
-    root:GetPropertyChangedSignal("AbsoluteSize"):Connect(scheduleRefresh)
     scroll:GetPropertyChangedSignal("Visible"):Connect(function() if scroll.Visible then scheduleRefresh() end end)
     lumenPages[name] = page
     lumenHosts[name] = { Left = leftColumn, Right = rightColumn, Shared = scroll, RefreshScroll = refreshScroll }
@@ -5648,9 +5615,8 @@ SyllinseRuntime.watchOuterMobileScrollFrames(ReptillianLibrary.Holder.Instance)
 layoutResponsiveShell = function()
     if not root or not root.Parent then return end
 
-    local canvasW, canvasH = baseWindowSize.X.Offset, baseWindowSize.Y.Offset
+    local canvasW, canvasH = responsiveWindowSize.X.Offset, responsiveWindowSize.Y.Offset
     local railWidth = SIDEBAR_WIDTH
-    compactTouchLayout = false
     PANEL_TOP = 73
     FOOTER_HEIGHT = 34
 
@@ -5663,17 +5629,21 @@ layoutResponsiveShell = function()
     header.Size = UDim2.new(1, -railWidth, 0, PANEL_TOP)
     local headerWidth = canvasW - railWidth
     local showAvatar = headerWidth >= 500
-    local searchWidth = math.clamp(headerWidth - (showAvatar and 244 or 200), 116, 242)
+    local searchWidth = compactTouchLayout and math.clamp(headerWidth - 190, 96, 200)
+        or math.clamp(headerWidth - (showAvatar and 244 or 200), 116, 242)
     local titleArea = headerWidth - searchWidth - (showAvatar and 112 or 54) - 10
     searchFrame.AnchorPoint = Vector2.new(1, 0)
     searchFrame.Position = UDim2.new(1, -54, 0, 13)
     searchFrame.Size = UDim2.fromOffset(searchWidth, 46)
     searchBox.PlaceholderText = searchWidth < 190 and "Search" or "Search Features"
+    searchBox.Position = UDim2.fromOffset(compactTouchLayout and 33 or 39, 0)
+    searchBox.Size = UDim2.new(1, compactTouchLayout and -40 or -48, 1, 0)
+    searchBox.TextSize = compactTouchLayout and 16 or 17
     avatar.Visible = showAvatar
     avatar.Size = UDim2.fromOffset(42, 42)
     avatar.Position = UDim2.new(1, -searchWidth - 112, 0, 15)
     dragHandle.Size = UDim2.new(0, math.min(470, titleArea), 1, 0)
-    headerTitle.Size = UDim2.new(0, math.min(250, titleArea - 60), 0, 34)
+    headerTitle.Size = UDim2.new(0, math.min(250, titleArea - (touchInputEnabled and 48 or 60)), 0, 34)
 
     logo.Size = UDim2.fromOffset(92, 100)
     logo.Position = UDim2.fromOffset(-7, -9)
@@ -5700,10 +5670,10 @@ layoutResponsiveShell = function()
     footerBar.Size = UDim2.new(1, 0, 0, FOOTER_HEIGHT)
     footerBar.Position = UDim2.new(0, 0, 1, -FOOTER_HEIGHT)
     footerLeftText.Size = UDim2.new(1, -148, 1, 0)
-    footerLeftText.TextSize = 14
+    footerLeftText.TextSize = touchInputEnabled and 15 or 14
     footerBrand.Size = UDim2.new(0, 132, 0, FOOTER_HEIGHT)
     footerBrand.Position = UDim2.new(1, -12, 1, -FOOTER_HEIGHT)
-    footerBrand.TextSize = 15
+    footerBrand.TextSize = touchInputEnabled and 16 or 15
     PANEL_HEIGHT = canvasH - PANEL_TOP - (footerBar.Visible and FOOTER_HEIGHT or 0)
 
     for tabName, page in pairs(lumenPages) do
@@ -5714,7 +5684,10 @@ layoutResponsiveShell = function()
             hosts.Shared.Size = UDim2.new(1, -railWidth - 1, 1, -(PANEL_TOP + (footerBar.Visible and FOOTER_HEIGHT or 0)))
             hosts.Shared.Visible = active
             SyllinseRuntime.stylePageScrollbar(hosts.Shared)
-            if hosts.RefreshScroll then hosts.RefreshScroll() end
+            if hosts.RefreshScroll and active then
+                hosts.RefreshScroll()
+                if not windowScaleTween then task.defer(hosts.RefreshScroll) end
+            end
         end
         if page and page.Frame then page.Frame.Visible = active end
     end
@@ -5919,12 +5892,14 @@ SyllinseRuntime.addNumericSlider = function(section, options)
         -- fill/stroke appears only while editing so it remains discoverable without
         -- creating a large pill that clashes with the rest of the UI.
         local suffixText = suffix
-        local suffixWidth = suffixText == "" and 0 or math.clamp(#suffixText * 5 + 3, 10, 42)
+        local suffixWidth = suffixText == "" and 0 or math.clamp(
+            #suffixText * (touchInputEnabled and 7 or 5) + 3, 10, touchInputEnabled and 52 or 42)
         local digitCount = #formatNumber(currentValue)
-        local editorWidth = math.clamp(digitCount * 6 + 5, 24, 42)
-        local nativeTextSize = nativeValueLabel and nativeValueLabel.TextSize or 12
+        local editorWidth = math.clamp(digitCount * (touchInputEnabled and 8 or 6) + 5, 24, 42)
+        local nativeTextSize = touchInputEnabled and 16 or (nativeValueLabel and nativeValueLabel.TextSize or 12)
         local nativeAbsHeight = nativeValueLabel and nativeValueLabel.AbsoluteSize.Y or 0
-        local fieldHeight = math.clamp(nativeAbsHeight > 0 and nativeAbsHeight or (nativeTextSize + 2), 13, 17)
+        local fieldHeight = touchInputEnabled and 19
+            or math.clamp(nativeAbsHeight > 0 and nativeAbsHeight or (nativeTextSize + 2), 13, 17)
         local valueRightOffset = rightOffset - suffixWidth - (suffixWidth > 0 and 2 or 0)
 
         local box = Instance.new("TextBox")
@@ -6680,8 +6655,7 @@ SyllinseRuntime.applyPanelTypography = function(color)
     local valueColor = Theme.PanelValue
     local brighterDefaultText = (SyllinseRuntime.activeAppearancePreset or "Original") == "Original"
 
-    -- Keep each authored TextSize unchanged. The root UIScale enlarges the whole
-    -- control tree together, so labels and their layout bounds stay proportional.
+    -- Store the authored size so refreshing a theme applies the mobile increase once.
     local function setNativeTypographySize(object, minimum, maximum)
         local baseSize = nativeTextBaseSizes[object]
         if baseSize == nil then
@@ -6689,7 +6663,7 @@ SyllinseRuntime.applyPanelTypography = function(color)
         end
         baseSize = math.clamp(baseSize, minimum, maximum)
         nativeTextBaseSizes[object] = baseSize
-        object.TextSize = math.max(1, math.floor(baseSize + 0.5))
+        object.TextSize = math.max(1, math.floor(baseSize + 0.5) + (touchInputEnabled and 2 or 0))
     end
 
     local function hasDropdownAncestor(object, sectionFrame)
@@ -6772,8 +6746,8 @@ SyllinseRuntime.applyPanelTypography = function(color)
                         nativeAlpha = tonumber(descendant.TextTransparency) or 0
                         descendant:SetAttribute("SyllinseOriginalTextTransparency", nativeAlpha)
                     end
-                    descendant.TextTransparency = brighterDefaultText and nativeAlpha < 1
-                        and math.min(nativeAlpha, 0.04) or nativeAlpha
+                    local maxAlpha = brighterDefaultText and 0.04 or (touchInputEnabled and 0.08 or 1)
+                    descendant.TextTransparency = nativeAlpha < 1 and math.min(nativeAlpha, maxAlpha) or nativeAlpha
                 end
 
                 if descendant:IsA("TextLabel") or descendant:IsA("TextBox") then
@@ -6781,7 +6755,8 @@ SyllinseRuntime.applyPanelTypography = function(color)
                     local isSectionTitle = descendant.Name == "Title"
                         and descendant.Parent
                         and descendant.Parent.Name == "Header"
-                    local isSecondary = name:find("body", 1, true)
+                    local inParagraph = touchInputEnabled and descendant.Parent and descendant.Parent.Name == "Paragraph"
+                    local isSecondary = (inParagraph and descendant.TextWrapped) or name:find("body", 1, true)
                         or name:find("description", 1, true)
                         or name:find("sublabel", 1, true)
                         or name:find("placeholder", 1, true)
@@ -6807,6 +6782,9 @@ SyllinseRuntime.applyPanelTypography = function(color)
                         targetColor = secondaryText
                         descendant.FontFace = FONT_REGULAR
                         setNativeTypographySize(descendant, 12, 13)
+                        if inParagraph and descendant.Position.Y.Offset > 0 then
+                            descendant.Position = UDim2.fromOffset(0, 22)
+                        end
                     elseif isValue then
                         targetColor = valueColor
                         descendant.FontFace = FONT_MEDIUM
@@ -6821,8 +6799,9 @@ SyllinseRuntime.applyPanelTypography = function(color)
                             setNativeTypographySize(descendant, 14, 14)
                         end
                     else
-                        descendant.FontFace = FONT_REGULAR
+                        descendant.FontFace = touchInputEnabled and FONT_MEDIUM or FONT_REGULAR
                         setNativeTypographySize(descendant, 14, 14)
+                        if inParagraph then descendant.Size = UDim2.new(1, 0, 0, 20) end
                     end
 
                     -- Label text above dropdown fields is the cramped case. A 14 px cap
@@ -6843,19 +6822,28 @@ SyllinseRuntime.applyPanelTypography = function(color)
                     descendant.FontFace = FONT_REGULAR
                     -- Color swatches sit inside RightContent. Make the visible swatch
                     -- slightly larger on desktop and mobile while preserving its real click action.
-                    if descendant.Name == "Button"
-                        and descendant.Parent and descendant.Parent.Name == "RightContent" then
+                    local swatchRow = descendant.Name == "Button" and Lumen._SyllinseInlineRow(descendant)
+                    if swatchRow then
                         local touchFirst = touchInputEnabled and not UserInputService.KeyboardEnabled
-                        local swatchSize = touchFirst and SYLLINSE_MANUAL_ICONS.ColorSwatch.TouchSize
-                            or SYLLINSE_MANUAL_ICONS.ColorSwatch.DesktopSize
-                        descendant.Size = UDim2.fromOffset(swatchSize, swatchSize)
-                        setManualCorner(descendant, SYLLINSE_MANUAL_ICONS.ColorSwatch.CornerRadius)
+                        local swatch = SYLLINSE_MANUAL_ICONS.ColorSwatch
+                        if swatchRow:FindFirstChild("Settings", true) then
+                            Lumen._SyllinseLayoutInlineControl(descendant, swatch, swatchRow)
+                        else
+                            local size = touchFirst and swatch.TouchSize or swatch.DesktopSize
+                            descendant.Size = UDim2.fromOffset(size, size)
+                        end
+                        setManualCorner(descendant, swatch.CornerRadius)
                         if touchFirst then
                             Lumen._SyllinseExpandMobileControlRow(descendant, 42)
                         end
                     end
                     if name == "button" and descendant.Parent and descendant.Parent.Name == "SliderFrame" then
                         descendant.BackgroundColor3 = Theme.SliderTrack
+                        if touchInputEnabled then
+                            Lumen._SyllinseResponsiveSizing(descendant, function(scale, button)
+                                button.Size = UDim2.new(1, 0, 0, math.ceil(30 / scale))
+                            end)
+                        end
                     end
                     -- Keep the main toggle target comfortably tappable on mobile.
                     if descendant.Name == "Toggle" then
@@ -6878,6 +6866,7 @@ SyllinseRuntime.applyPanelTypography = function(color)
                         -- then multiplied by the same physical size factor as the row.
                     else
                         setNativeTypographySize(descendant, 13, 13)
+                        if touchInputEnabled then descendant.FontFace = FONT_MEDIUM end
                         descendant.BackgroundColor3 = Theme.ButtonFill or (Theme.ThemedControls
                             and Theme.Surface:Lerp(Theme.Accent, Theme.Style.ButtonTint) or Theme.Surface)
                         if Theme.ThemedControls then descendant.TextColor3 = Theme.PanelValue end
@@ -6918,18 +6907,16 @@ SyllinseRuntime.applyPanelTypography = function(color)
                 elseif descendant:IsA("ImageLabel") or descendant:IsA("ImageButton") then
                     -- Use the supplied image asset only for Lumen's settings/keybind icon.
                     -- The notification bell keeps its original image and behavior.
-                    local isSettingsIcon = descendant.Name == "Settings"
-                        and descendant.Parent and descendant.Parent.Name == "RightContent"
-                    local isNotificationBell = string.find(descendant.Name, "FeatureNotificationBell_", 1, true) == 1
-                        and descendant.Parent and descendant.Parent.Name == "RightContent"
+                    local rightContent = Lumen._SyllinseInlineRow(descendant)
+                    local isSettingsIcon = rightContent and descendant.Name == "Settings"
+                    local isNotificationBell = rightContent and string.find(descendant.Name, "FeatureNotificationBell_", 1, true) == 1
 
                     if isSettingsIcon or isNotificationBell then
                         local touchFirst = touchInputEnabled and not UserInputService.KeyboardEnabled
                         local iconConfig = isNotificationBell
                             and SYLLINSE_MANUAL_ICONS.NotificationBell
                             or SYLLINSE_MANUAL_ICONS.Settings
-                        local iconSize = touchFirst and iconConfig.TouchSize or iconConfig.DesktopSize
-                        descendant.Size = UDim2.fromOffset(iconSize, iconSize)
+                        Lumen._SyllinseLayoutInlineControl(descendant, iconConfig, rightContent)
                         descendant.BackgroundTransparency = 1
                         descendant.BorderSizePixel = 0
                         descendant.ScaleType = Enum.ScaleType.Fit
@@ -7082,14 +7069,15 @@ SyllinseRuntime.applyPanelTypography = function(color)
                         end
                     elseif name == "sliderbar" then
                         descendant.ImageColor3 = Theme.SliderTrack
-                    else
+                    elseif name ~= "syllinsesliderthumbicon" then
                         descendant.ImageColor3 = iconColor
                     end
                 elseif descendant:IsA("Frame") then
                     if name == "button" and descendant.Parent and descendant.Parent.Name == "SliderFrame" then
                         descendant.BackgroundColor3 = Theme.SliderTrack
-                    elseif name == "overlay" and descendant.Parent and descendant.Parent.Name == "Button"
-                        and descendant.Parent.Parent and descendant.Parent.Parent.Name == "SliderFrame" then
+                    elseif name == "syllinsesliderrail" then
+                        descendant.BackgroundColor3 = Theme.SliderTrack
+                    elseif name == "overlay" and descendant.Parent and descendant.Parent.Name == "SyllinseSliderRail" then
                         local gradient = descendant:FindFirstChildOfClass("UIGradient")
                         if gradient then
                             descendant.BackgroundColor3 = Color3.new(1, 1, 1)
@@ -7100,6 +7088,28 @@ SyllinseRuntime.applyPanelTypography = function(color)
                         end
                     elseif name == "circle" then
                         descendant.BackgroundColor3 = Theme.SliderHandle
+                        if descendant.Parent and descendant.Parent.Name == "Button"
+                            and descendant.Parent.Parent and descendant.Parent.Parent.Name == "SliderFrame" then
+                            local asset = SYLLINSE_MANUAL_ICONS.SliderThumbs[SyllinseRuntime.sliderThumbStyle]
+                            local icon = descendant:FindFirstChild("SyllinseSliderThumbIcon")
+                            if asset and not icon then
+                                icon = Instance.new("ImageLabel")
+                                icon.Name = "SyllinseSliderThumbIcon"
+                                icon.BackgroundTransparency = 1
+                                icon.Size = UDim2.fromScale(1, 1)
+                                icon.ScaleType = Enum.ScaleType.Fit
+                                icon.ZIndex = descendant.ZIndex
+                                icon.Parent = descendant
+                                icon:GetPropertyChangedSignal("IsLoaded"):Connect(function()
+                                    descendant.BackgroundTransparency = icon.Visible and icon.IsLoaded and 1 or 0
+                                end)
+                            end
+                            if icon then
+                                icon.Image = asset or ""
+                                icon.Visible = asset ~= nil
+                                descendant.BackgroundTransparency = icon.Visible and icon.IsLoaded and 1 or 0
+                            end
+                        end
                     end
                 end
             end
@@ -7208,7 +7218,7 @@ SyllinseRuntime.refreshAppearance = function()
     Theme.SliderTrack = secondary:Lerp(subtext, 0.35)
     Theme.SliderHead = accent
     Theme.SliderHandle = accent:Lerp(text, 0.35)
-    Theme.SliderFillBottom = secondary:Lerp(accent, 0.7)
+    Theme.SliderFillBottom = secondary:Lerp(accent, 0.45)
     Theme.SliderFillTop = accent
     Theme.ToggleOffTrack = secondary:Lerp(subtext, 0.28)
     Theme.ToggleOffThumb = subtext:Lerp(text, 0.25)
@@ -7413,6 +7423,19 @@ SyllinseRuntime.initializeAppearance = function()
     SyllinseRuntime.moduleTransparencyControl = SyllinseRuntime.addNumericSlider(SyllinseRuntime.settingsRight, {
         Name = "Module Transparency"; Suffix = "%"; Min = 0; Max = 100; Value = 0; Increment = 1;
         Flag = "ThemeModuleTransparency"; Callback = SyllinseRuntime.applyModuleTransparency;
+    })
+    local thumbNames = {}
+    for name in pairs(SYLLINSE_MANUAL_ICONS.SliderThumbs) do table.insert(thumbNames, name) end
+    table.sort(thumbNames)
+    table.insert(thumbNames, 1, "Default")
+    SyllinseRuntime.addReptillianDropdown(SyllinseRuntime.settingsRight, {
+        Name = "Slider Thumb", Options = thumbNames, Value = "Default", Flag = "SyllinseSliderThumb",
+        Callback = function(name)
+            local style = SYLLINSE_MANUAL_ICONS.SliderThumbs[name] and name or "Default"
+            if SyllinseRuntime.sliderThumbStyle == style then return end
+            SyllinseRuntime.sliderThumbStyle = style
+            SyllinseRuntime.applyPanelTypography(Theme.PanelText)
+        end,
     })
     SyllinseRuntime.panelDividerControl = SyllinseRuntime.addReptillianDropdown(SyllinseRuntime.settingsRight, {
         Name = "Panel Divider"; Options = { "Filled", "Line" }; Value = "Filled"; Flag = "ThemePanelDivider";
@@ -10322,13 +10345,13 @@ return open_gif
             return false
         end
         activePool.NeededPage = nil
-        if index == frameIndex and image == activePool.VisibleImage then return true end
+        local shellAspect = responsiveWindowSize.X.Offset / responsiveWindowSize.Y.Offset
+        if index == frameIndex and image == activePool.VisibleImage and activePool.VisibleAspect == shellAspect then return true end
 
         -- Crop within the current cell to fill the shell without changing its proportions.
         local cleanedSize = activePool.CellSizes[page]
         local width = cleanedSize and cleanedSize.X or animation.CellWidth
         local height = cleanedSize and cleanedSize.Y or animation.CellHeight
-        local shellAspect = baseWindowSize.X.Offset / baseWindowSize.Y.Offset
         local cropWidth = math.clamp(math.round(height * shellAspect), 1, width)
         local cropHeight = math.clamp(math.round(width / shellAspect), 1, height)
         image.ImageRectSize = Vector2.new(cropWidth, cropHeight)
@@ -10360,6 +10383,7 @@ return open_gif
             activePool.VisibleImage = image
         end
         frameIndex = index
+        activePool.VisibleAspect = shellAspect
         return true
     end
 
@@ -12353,6 +12377,14 @@ SyllinseRuntime.initializeButtonAppearance = function()
     local http = game:GetService("HttpService")
     local api = assert(SyllinseRuntime.buttonMediaService)
     local section = SyllinseRuntime.settingsButton
+    local positionFields = {
+        { Key = "X", Name = "X", Min = 0, Max = 100, Suffix = "%" },
+        { Key = "Y", Name = "Y", Min = 0, Max = 100, Suffix = "%" },
+        { Key = "OffsetX", Name = "Offset X", Min = -200, Max = 200, Suffix = " px" },
+        { Key = "OffsetY", Name = "Offset Y", Min = -200, Max = 200, Suffix = " px" },
+        { Key = "Scale", Name = "Button Scale", Min = 60, Max = 150, Suffix = "%" },
+    }
+    local positionControls, syncingPosition = {}, false
     local path = "Syllinse/Button/settings.json"
     -- Existing settings can still reference a preset from the former dropdown.
     local presets = {}
@@ -12362,7 +12394,8 @@ SyllinseRuntime.initializeButtonAppearance = function()
     local state = { Preset = "Follow", Fill = Theme.Root, Stroke = Theme.Stroke, Media = "" }
     local controls, byName, byUrl = {}, {}, {}
     local syncing, restoring, applying = false, true, false
-    local generation, saveGeneration, active, loading = 0, 0, nil, false
+    local generation, saveGeneration, active, pendingUrl = 0, 0, nil, nil
+    local listedNames = {}
     local function notify(message, kind)
         SyllinseRuntime.notify("Open/Close Button", message, kind or "Info", 4)
     end
@@ -12378,13 +12411,21 @@ SyllinseRuntime.initializeButtonAppearance = function()
         color(data.Color); color(data.Background)
         assert(type(data.Media) == "string" and #data.Media <= 72 and (data.Media == "" or data.Media:match("^saved://[%w_-]+$")), "Invalid button background")
         assert(validNumber(data.Opacity, 0, 100), "Invalid button opacity")
+        if data.Placement ~= nil then
+            assert(type(data.Placement) == "table", "Invalid button position")
+            for _, field in ipairs(positionFields) do
+                assert(validNumber(data.Placement[field.Key], field.Min, field.Max), "Invalid button position")
+            end
+        end
         return data
     end
     local function snapshot()
         -- Keep the original save keys so existing button settings still load.
+        local placement = {}
+        for _, field in ipairs(positionFields) do placement[field.Key] = launcherPlacement[field.Key] end
         return { Version = 1, Preset = state.Preset, Color = { state.Stroke.R, state.Stroke.G, state.Stroke.B },
             Background = { state.Fill.R, state.Fill.G, state.Fill.B }, Media = state.Media,
-            Opacity = SyllinseRuntime.featureSettings.LauncherOpacity or 100 }
+            Opacity = SyllinseRuntime.featureSettings.LauncherOpacity or 100, Placement = placement }
     end
     local function record()
         local bytes = http:JSONEncode(snapshot())
@@ -12446,28 +12487,39 @@ SyllinseRuntime.initializeButtonAppearance = function()
             names[#names + 1] = entry.Name
         end
         table.sort(names, function(a, b) if a == b then return false end;if a == "None" then return true end;if b == "None" then return false end;return a:lower() < b:lower() end)
-        if controls.Media then
+        local changed = #names ~= #listedNames
+        if not changed then
+            for index, name in ipairs(names) do
+                if name ~= listedNames[index] then changed = true; break end
+            end
+        end
+        listedNames = names
+        if controls.Media and changed then
             syncing = true
             controls.Media.UpdateOptions(names)
-            controls.Media.Set(byUrl[state.Media] or "None")
             syncing = false
         end
         return names
     end
+    local function syncMediaSelection(url)
+        local name = byUrl[url] or "None"
+        if controls.Media and controls.Media.Value ~= name then
+            syncing = true
+            controls.Media.Set(name)
+            syncing = false
+        end
+    end
     local function selectMedia(url)
+        if pendingUrl == url then return end
         generation += 1
         local token = generation
         if url == state.Media then
-            loading = false
-            if controls.Media then
-                syncing = true
-                controls.Media.Set(byUrl[state.Media] or "None")
-                syncing = false
-            end
+            pendingUrl = nil
+            syncMediaSelection(url)
             record()
             return
         end
-        loading = true
+        pendingUrl = url
         local committed = false
         local function alive() return gui.Parent ~= nil and (committed or token == generation) end
         task.spawn(function()
@@ -12479,9 +12531,13 @@ SyllinseRuntime.initializeButtonAppearance = function()
                 if ok and candidate then candidate:Destroy() end
                 return
             end
-            loading = false
+            pendingUrl = nil
             if not ok then
-                refreshList()
+                if state.Media ~= "" and not byUrl[state.Media] then
+                    selectMedia("")
+                else
+                    syncMediaSelection(state.Media)
+                end
                 notify("Could not load button background. " .. tostring(candidate):sub(1, 160), "Error")
                 return
             end
@@ -12493,13 +12549,13 @@ SyllinseRuntime.initializeButtonAppearance = function()
                 previous:SetEnabled(false)
                 if active then task.delay(0.12, function() previous:Destroy() end) else previous:Destroy() end
             end
-            refreshList()
+            syncMediaSelection(url)
             record()
         end)
     end
     syncing = true
     controls.Media = SyllinseRuntime.addReptillianDropdown(section, {
-        Name = "Button Background", Options = refreshList(), Value = "None", Search = true,
+        Name = "Button Background", Options = refreshList(), Value = "None", Search = true, KeepSelection = true,
         Callback = function(name) if not syncing then selectMedia(byName[name] or "") end end,
     })
     controls.Color = section:Label({ Text = "Button Color" }):Colorpicker({ Title = "Button Color", Color = Theme.Root,
@@ -12516,6 +12572,32 @@ SyllinseRuntime.initializeButtonAppearance = function()
             state.Preset, state.Fill, state.Stroke = "Custom", fill, value
             SyllinseRuntime.applyLauncherAppearance();record()
         end })
+    local function syncPosition()
+        syncingPosition = true
+        for key, control in pairs(positionControls) do control.Set(launcherPlacement[key]) end
+        syncingPosition = false
+    end
+    for _, field in ipairs(positionFields) do
+        local key = field.Key
+        if key == "Scale" then
+            section:Button({ Name = "Reset Position"; Callback = function()
+                for name, value in pairs(launcherPlacement.Defaults) do launcherPlacement[name] = value end
+                updateLauncherResponsiveScale()
+                syncPosition()
+                record()
+            end })
+        end
+        positionControls[key] = SyllinseRuntime.addNumericSlider(section, {
+            Name = field.Name, Value = launcherPlacement[key], Min = field.Min, Max = field.Max,
+            Increment = 1, Suffix = field.Suffix,
+            Callback = function(value)
+                if syncingPosition or launcherPlacement[key] == value then return end
+                launcherPlacement[key] = value
+                updateLauncherResponsiveScale()
+                record()
+            end,
+        })
+    end
     local opacityControl = SyllinseRuntime.addNumericSlider(section, {
         Name = "Button Opacity",
         Suffix = "%",
@@ -12532,6 +12614,13 @@ SyllinseRuntime.initializeButtonAppearance = function()
         state.Preset, state.Fill, state.Stroke = data.Preset, color(data.Background), color(data.Color)
         SyllinseRuntime.applyLauncherAppearance()
         opacityControl.Set(data.Opacity)
+        if data.Placement then
+            for _, field in ipairs(positionFields) do
+                launcherPlacement[field.Key] = data.Placement[field.Key]
+            end
+            updateLauncherResponsiveScale()
+            syncPosition()
+        end
         restoring = false
         selectMedia(data.Media)
     end
@@ -12541,9 +12630,12 @@ SyllinseRuntime.initializeButtonAppearance = function()
     end })
     api.Listeners[#api.Listeners + 1] = function()
         refreshList()
-        if state.Media ~= "" and not byUrl[state.Media] then
-            selectMedia("")
+        local requested = pendingUrl or state.Media
+        if requested ~= "" and not byUrl[requested] then
+            selectMedia(byUrl[state.Media] and state.Media or "")
             notify("The saved button background was removed from the library.", "Warning")
+        elseif not pendingUrl then
+            syncMediaSelection(state.Media)
         end
     end
     launcher:GetPropertyChangedSignal("Visible"):Connect(syncMedia)
@@ -12561,7 +12653,7 @@ SyllinseRuntime.initializeButtonAppearance = function()
         end
     end
     restoring = false
-    if not loading then record() end
+    if not pendingUrl then record() end
 end
 SyllinseRuntime.initializeButtonAppearance()
 SyllinseRuntime.initializeButtonAppearance = nil
@@ -12992,17 +13084,15 @@ do
 end
 SyllinseRuntime.notify("Syllinse", "Lumen controls loaded.", "Success", 2)
 
--- Keep the backdrop outside the CanvasGroup so it renders directly at window resolution.
--- Both layers still move and scale together under the root.
+-- Keep the backdrop beneath the controls. Both layers scale with the root.
 for _, child in ipairs(root:GetChildren()) do
     if child ~= motionBody and child.Name ~= "SyllinseThemeBackdrop" and child:IsA("GuiObject") then
         child.Parent = motionBody
     end
 end
-motionBody.GroupTransparency = 0
 refreshLauncherVisibility()
 
--- Open the initial shell with the Syllinse launcher-summon animation.
+-- Open the shell in place.
 setWindowOpen(true)
 
 -- Toggle the Syllinse main window with the user-configured key. Keep Lumen's
