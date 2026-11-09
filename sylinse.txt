@@ -224,7 +224,7 @@ local SYLLINSE_MANUAL_ICONS = {
     Settings = { -- keybind/settings gear beside each control
         Image = "rbxassetid://133013236590645",
         RowOrder = 2,
-        ArtworkScale = 0.95, -- This image has extra transparent padding.
+        ArtworkScale = 0.95,
         -- Idle tint uses Theme.Muted, shared with the bell's inactive state.
         -- These are the only two custom highlight options.
         HoverColor = Color3.fromRGB(184, 182, 182),
@@ -449,6 +449,8 @@ local responsiveScaleValue = 1
 local windowSizePercent = 100
 local windowSizeMultiplier = 1.0
 local compactTouchLayout = false
+local landscapeTouchLayout = false
+local mobileShellMargin = 12
 local responsiveWindowSize = baseWindowSize
 local mobileSafeOffsetX = 0
 local mobileSafeOffsetY = 0
@@ -458,6 +460,14 @@ local layoutResponsiveShell
 local windowScaleTween
 local resizeResponsiveControls
 local function getWindowSafeBounds(viewport)
+    if touchInputEnabled then
+        local ok, area = pcall(function()
+            return GuiService:GetInsetArea(Enum.ScreenInsets.CoreUISafeInsets)
+        end)
+        if ok and area and area.Max.X > area.Min.X and area.Max.Y > area.Min.Y then
+            return area.Min, area.Max
+        end
+    end
     local start, finish = GuiService:GetGuiInset()
     local guiStart = gui.AbsolutePosition
     local guiSize = gui.AbsoluteSize
@@ -553,9 +563,8 @@ local function updateScale(preserveWindowPosition)
     if not camera then return end
     local viewport = camera.ViewportSize
 
-    -- A manual size-slider edit must never rewrite root.Position. Keep its exact
-    -- UDim2 value so the shell stays where the user left it while UIScale changes.
-    -- Viewport/orientation updates may still recenter or clamp the shell normally.
+    -- A size-slider edit keeps the current center unless a dragged mobile shell
+    -- needs to move back inside the safe area as it grows.
 
     -- Read all four safe-area insets. The previous calculation only used the
     -- vertical values, which could leave the shell offset or clipped on devices
@@ -563,24 +572,26 @@ local function updateScale(preserveWindowPosition)
     local safeStart, safeEnd = getWindowSafeBounds(viewport)
 
     local touchDevice = touchInputEnabled
-    -- Use the maximum safe display area. Keep only a 4px mobile edge gap so the
-    -- shell can grow as large as possible without touching/crossing the screen edge.
-    local horizontalMargin = touchDevice and 4 or 18
-    local verticalMargin = touchDevice and 4 or 18
-    local availableWidth = math.max(1,
-        safeEnd.X - safeStart.X - horizontalMargin * 2)
-    local availableHeight = math.max(1,
-        safeEnd.Y - safeStart.Y - verticalMargin * 2)
+    local margin = touchDevice and mobileShellMargin or 18
+    local availableWidth = math.max(1, safeEnd.X - safeStart.X - margin * 2)
+    local availableHeight = math.max(1, safeEnd.Y - safeStart.Y - margin * 2)
 
-    -- Fit the phone canvas to its viewport before applying the user's scale.
-    -- This lets ordinary phone sizes render text at native size at 100%.
-    compactTouchLayout = touchDevice and (availableWidth < 700 or availableWidth < availableHeight * 1.15)
+    -- Use the height budget to limit how wide the landscape canvas can get.
+    -- Fit the resulting canvas uniformly so text can stay at native size where possible.
+    landscapeTouchLayout = touchDevice and availableWidth >= availableHeight * 1.15
     if touchDevice then
         local width = math.clamp(math.floor(availableWidth), 360, baseWindowSize.X.Offset)
-        local heightLimit = compactTouchLayout and math.min(800, math.floor(width * 1.8)) or 520
-        local height = math.clamp(math.floor(availableHeight), 280, heightLimit)
+        local height
+        if landscapeTouchLayout then
+            height = math.clamp(math.floor(availableHeight), 300, 480)
+            width = math.min(width, height * 2, 820)
+        else
+            height = math.clamp(math.floor(availableHeight), 280, math.min(800, math.floor(width * 1.8)))
+        end
+        compactTouchLayout = not landscapeTouchLayout or width < 600
         responsiveWindowSize = UDim2.fromOffset(width, height)
     else
+        compactTouchLayout = false
         responsiveWindowSize = baseWindowSize
     end
     local fittedScale = math.min(1, availableWidth / responsiveWindowSize.X.Offset,
@@ -591,8 +602,7 @@ local function updateScale(preserveWindowPosition)
     refreshNativeResponsiveLayout()
     if resizeResponsiveControls then resizeResponsiveControls() end
 
-    -- Only viewport/orientation updates are allowed to reposition the shell.
-    -- Editing UI scale leaves root.Position byte-for-byte unchanged.
+    -- Recompute the default center only when the viewport changes.
     if not preserveWindowPosition then
         local safeOffset = (safeStart + safeEnd - gui.AbsoluteSize) * 0.5 - gui.AbsolutePosition
         mobileSafeOffsetX = math.round(safeOffset.X)
@@ -602,14 +612,12 @@ local function updateScale(preserveWindowPosition)
         end
     end
 
-    -- Keep a manually dragged shell fully inside the safe rectangle after rotation
-    -- or viewport changes. Use the actual rendered size (including UIScale).
-    if windowHasCustomPosition and not preserveWindowPosition then
+    -- Keep a dragged mobile shell inside the safe rectangle when it grows too.
+    if windowHasCustomPosition and (touchDevice or not preserveWindowPosition) then
         task.defer(function()
             if not root.Parent then return end
             local currentSize = Vector2.new(responsiveWindowSize.X.Offset, responsiveWindowSize.Y.Offset)
                 * responsiveScaleValue
-            local margin = touchDevice and 4 or 18
             local minX = safeStart.X + currentSize.X / 2 + margin
             local maxX = safeEnd.X - currentSize.X / 2 - margin
             local minY = safeStart.Y + currentSize.Y / 2 + margin
@@ -648,6 +656,9 @@ Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
     watchCurrentCamera(Workspace.CurrentCamera)
     task.defer(updateScale)
 end)
+if touchInputEnabled then
+    gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function() task.defer(updateScale) end)
+end
 
 -- Sidebar / icon rail
 local sidebar = makeFrame("Sidebar", root, UDim2.new(0, 77, 1, 0), UDim2.fromOffset(0, 0), Theme.Root)
@@ -1512,7 +1523,8 @@ for itemIndex, item in ipairs(navItems) do
             navHoverState = isHovered
             -- Keep the icon's subtle 1.04x hover animation. Text stays at native scale
             -- so its letterforms remain crisp; the label color still animates with hover.
-            tween(hoverScale, 0.16, { Scale = isHovered and 1.04 or 1 })
+            local layoutScale = navReference and navReference.LayoutScale or 1
+            tween(hoverScale, 0.16, { Scale = layoutScale * (isHovered and 1.04 or 1) })
         end
 
         -- Never draw a tile or hitbox around a sidebar tab. Only the icon and its
@@ -1581,12 +1593,10 @@ for itemIndex, item in ipairs(navItems) do
         Icon = icon,
         Gear = gearIcon,
         Outline = outline,
-        BaseButtonWidth = navTapSize,
-        BaseButtonHeight = navTapSize,
-        BaseButtonX = NAV_BUTTON_X,
         BaseY = navRowY,
         TerminologyLabelY = terminologyLabelPositionY,
         BaseIconSize = item.IconSize or 34,
+        HoverScale = hoverScale,
         Hovering = false,
     }
     table.insert(navButtons, navReference)
@@ -2206,10 +2216,10 @@ UserInputService.InputChanged:Connect(function(input)
         local centerY = guiOrigin.Y + guiSize.Y * startPosition.Y.Scale + startPosition.Y.Offset + pointerDelta.Y
 
         -- The left edge can leave the screen, but the drag icon itself must remain visible.
-        local minCenterX = safeStart.X + (touchInputEnabled and (4 + shellSize.X / 2)
+        local minCenterX = safeStart.X + (touchInputEnabled and (mobileShellMargin + shellSize.X / 2)
             or (14 + dragSize.X - shellSize.X / 2))
         -- Keep the right edge of the shell on-screen so it cannot hide the drag icon.
-        local maxCenterX = safeEnd.X - shellSize.X / 2 - (touchInputEnabled and 4 or 8)
+        local maxCenterX = safeEnd.X - shellSize.X / 2 - (touchInputEnabled and mobileShellMargin or 8)
         if minCenterX > maxCenterX then
             maxCenterX = safeEnd.X - shellSize.X / 2 + 2
             minCenterX = math.min(minCenterX, maxCenterX)
@@ -2219,8 +2229,8 @@ UserInputService.InputChanged:Connect(function(input)
         -- Top matches the right side: keep the complete shell inside the top margin.
         -- Bottom remains flexible, but the top-right drag handle must stay reachable.
         local dragOffsetY = dragButton.AbsolutePosition.Y - root.AbsolutePosition.Y
-        local minCenterY = safeStart.Y + shellSize.Y / 2 + (touchInputEnabled and 4 or 8)
-        local maxCenterY = touchInputEnabled and (safeEnd.Y - shellSize.Y / 2 - 4)
+        local minCenterY = safeStart.Y + shellSize.Y / 2 + (touchInputEnabled and mobileShellMargin or 8)
+        local maxCenterY = touchInputEnabled and (safeEnd.Y - shellSize.Y / 2 - mobileShellMargin)
             or (safeEnd.Y - 8 - dragOffsetY - dragSize.Y + shellSize.Y / 2)
         if maxCenterY < minCenterY then
             centerY = minCenterY
@@ -5616,6 +5626,7 @@ layoutResponsiveShell = function()
     if not root or not root.Parent then return end
 
     local canvasW, canvasH = responsiveWindowSize.X.Offset, responsiveWindowSize.Y.Offset
+    local shortLandscape = landscapeTouchLayout and canvasH < 450
     local railWidth = SIDEBAR_WIDTH
     PANEL_TOP = 73
     FOOTER_HEIGHT = 34
@@ -5645,26 +5656,42 @@ layoutResponsiveShell = function()
     dragHandle.Size = UDim2.new(0, math.min(470, titleArea), 1, 0)
     headerTitle.Size = UDim2.new(0, math.min(250, titleArea - (touchInputEnabled and 48 or 60)), 0, 34)
 
-    logo.Size = UDim2.fromOffset(92, 100)
-    logo.Position = UDim2.fromOffset(-7, -9)
-    logoGlowCyan.Size = UDim2.fromOffset(102, 102)
-    logoGlowCyan.Position = UDim2.fromOffset(-13, -11)
-    logoGlowViolet.Size = UDim2.fromOffset(98, 100)
-    logoGlowViolet.Position = UDim2.fromOffset(-10, -9)
+    logo.Size = shortLandscape and UDim2.fromOffset(72, 78) or UDim2.fromOffset(92, 100)
+    logo.Position = shortLandscape and UDim2.fromOffset(2, -7) or UDim2.fromOffset(-7, -9)
+    logoGlowCyan.Size = shortLandscape and UDim2.fromOffset(80, 80) or UDim2.fromOffset(102, 102)
+    logoGlowCyan.Position = shortLandscape and UDim2.fromOffset(-2, -9) or UDim2.fromOffset(-13, -11)
+    logoGlowViolet.Size = shortLandscape and UDim2.fromOffset(76, 78) or UDim2.fromOffset(98, 100)
+    logoGlowViolet.Position = shortLandscape and UDim2.fromOffset(0, -7) or UDim2.fromOffset(-10, -9)
     local logoFallback = sidebar:FindFirstChild("ImageFallback")
     if logoFallback then
-        logoFallback.Size = UDim2.fromOffset(60, 60)
-        logoFallback.Position = UDim2.fromOffset(8, 10)
+        logoFallback.Size = shortLandscape and UDim2.fromOffset(46, 46) or UDim2.fromOffset(60, 60)
+        logoFallback.Position = shortLandscape and UDim2.fromOffset(15, 7) or UDim2.fromOffset(8, 10)
+        local letter = logoFallback:FindFirstChild("LogoFallbackS")
+        if letter then letter.TextSize = shortLandscape and 41 or 54 end
     end
 
-    -- Preserve the 55x55 touch targets after viewport/orientation changes.
-    for _, nav in ipairs(navButtons) do
+    local navTop = shortLandscape and 66 or 100
+    local navSize = shortLandscape and 42 or NAV_BUTTON_SIZE
+    local navStride = shortLandscape and (showMenuFunctionTerminology and 60 or 44) or NAV_ROW_HEIGHT
+    for index, nav in ipairs(navButtons) do
+        local y = 2 + (index - 1) * navStride
         nav.Button.Size = UDim2.fromOffset(NAV_BUTTON_SIZE, NAV_BUTTON_SIZE)
-        nav.Button.Position = UDim2.fromOffset(nav.BaseButtonX or NAV_BUTTON_X, nav.BaseY or 2)
+        nav.Button.AnchorPoint = Vector2.new(0.5, 0)
+        nav.Button.Position = UDim2.fromOffset(railWidth * 0.5, y)
+        nav.LayoutScale = navSize / NAV_BUTTON_SIZE
+        if nav.HoverScale then nav.HoverScale.Scale = nav.LayoutScale * (nav.Hovering and 1.04 or 1) end
+        nav.TerminologyLabelY = y + navSize - 1
+        local label = terminologyLabels[nav.Name]
+        if label then label.Position = UDim2.fromOffset(railWidth * 0.5, nav.TerminologyLabelY) end
     end
     if navContainer and navContainer.Parent then
-        navContainer.Size = UDim2.new(1, 0, 1, -100 - footerInset)
-        navContainer.CanvasSize = UDim2.fromOffset(0, 4 + #navButtons * NAV_ROW_HEIGHT)
+        local canvasHeight = 4 + #navButtons * navStride
+        navContainer.Position = UDim2.fromOffset(0, navTop)
+        navContainer.Size = UDim2.new(1, 0, 1, -navTop - footerInset)
+        navContainer.CanvasSize = UDim2.fromOffset(0, canvasHeight)
+        if shortLandscape and canvasHeight <= canvasH - navTop - footerInset then
+            navContainer.CanvasPosition = Vector2.new(0, 0)
+        end
     end
 
     footerBar.Size = UDim2.new(1, 0, 0, FOOTER_HEIGHT)
@@ -6514,6 +6541,7 @@ SyllinseRuntime.addToggle(SyllinseRuntime.terminologyLabelSetting, {
     Callback = function(state)
         showMenuFunctionTerminology = state == true
         SyllinseRuntime.featureSettings.ShowMenuFunctionTerminology = showMenuFunctionTerminology
+        if landscapeTouchLayout then refreshNativeResponsiveLayout() end
         for _, nav in ipairs(navButtons) do
             local label = terminologyLabels[nav.Name]
             -- Keep the tab buttons' original position and hitbox in both modes.
